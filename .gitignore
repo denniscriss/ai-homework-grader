@@ -1,0 +1,18 @@
+# Student data & grading outputs (may contain PII)
+*.pdf
+*.zip
+grading_output*/
+outputs/
+__pycache__/
+*.pyc
+
+# API keys & credentials
+.env
+*.key
+
+# Excel grade files (contain student names/IDs/scores)
+*.xlsx
+
+# OS files
+.DS_Store
+Thumbs.db
