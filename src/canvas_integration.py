@@ -49,6 +49,7 @@ from grade_homework_skill_patch import (
     load_or_extract_answer_key,
     load_existing_results,
     make_ai_backend,
+    merge_results_by_student,
     norm_id,
     norm_text,
     normalize_result,
@@ -1190,7 +1191,7 @@ def integrated_main(args: argparse.Namespace) -> int:
             existing_results = load_existing_results(output_dir) if args.resume else {}
             if existing_results and args.resume:
                 print(f"Found {len(existing_results)} reusable existing result(s).")
-            results = run_grading_pipeline(
+            file_results = run_grading_pipeline(
                 ai=ai,
                 student_pdfs=student_pdfs,
                 answer_key=answer_key,
@@ -1213,13 +1214,15 @@ def integrated_main(args: argparse.Namespace) -> int:
             if not args.no_review_pass:
                 print("=" * 60)
                 print("Second-pass review for flagged questions...")
-                review_flagged_questions(ai, results, answer_key, extra_rules, rate_limiter=rate_limiter)
+                review_flagged_questions(ai, file_results, answer_key, extra_rules, rate_limiter=rate_limiter)
 
             # --- Attach canvas_user_id to each result ---
-            for result in results:
+            for result in file_results:
                 canvas_uid = resolve_canvas_user_id(result, grading_roster)
                 if canvas_uid is not None:
                     result["canvas_user_id"] = canvas_uid
+
+            results = merge_results_by_student(file_results, answer_key, grading_roster, args.score_decimals)
 
             # --- Statistical outlier check ---
             if len(results) >= 3:
@@ -1230,7 +1233,11 @@ def integrated_main(args: argparse.Namespace) -> int:
             # --- Write output files ---
             if results:
                 results[0]["_score_decimals"] = args.score_decimals
+            file_results = sanitize_for_output(file_results)
             results = sanitize_for_output(results)
+            (output_dir / "file_results.json").write_text(
+                json.dumps(file_results, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             (output_dir / "results.json").write_text(
                 json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -1258,7 +1265,7 @@ def integrated_main(args: argparse.Namespace) -> int:
                 run_started_at,
                 write_json=args.output_profile == "full",
             )
-            write_submission_diagnostics(output_dir, results, write_json=args.output_profile == "full")
+            write_submission_diagnostics(output_dir, file_results, write_json=args.output_profile == "full")
 
         # --- Upload grades to Canvas ---
         if args.canvas_skip_upload:

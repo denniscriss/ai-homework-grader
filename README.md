@@ -428,9 +428,12 @@ Canvas 采用漏桶算法限流。脚本内置了：
 | `answer_key_meta.json` | 参考答案 PDF 指纹和配分参数，用于判断缓存是否可复用 |
 | `AI请求速率分析.md` | AI 请求次数、平均速率和限流等待统计 |
 | `作业耗时诊断.md` | 每份作业的总耗时、渲染耗时、AI 请求耗时和异常原因 |
-| `results.json` | 完整的结构化批改结果 |
+| `results.json` | 按学生合并后的最终结构化结果；同一学生多文件会按题号合并 |
+| `file_results.json` | 按单个文件保存的批改结果，用于续跑缓存和追溯 |
 
-运行中会实时写入 `partial_results.json` 作为中断备份；`compact` 模式正常完成后会删除它，下一次续跑使用 `results.json`。
+运行中会实时写入 `partial_results.json` 作为中断备份；`compact` 模式正常完成后会删除它，下一次续跑优先使用 `file_results.json`。
+
+如果同一学生提交多个文件，程序默认按学生合并最终成绩：同一题号在多个文件中取最高分，不同题号重新汇总为该学生总分。`批改明细.xlsx` 会保留题目来源文件，方便追溯。
 
 加 `--output-profile full` 时额外生成：
 

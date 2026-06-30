@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -1297,6 +1298,210 @@ def normalize_result(
     return result
 
 
+def _result_student_group_key(result: dict[str, Any], roster: list[dict[str, str]]) -> tuple[str, str]:
+    matched = match_roster(result, roster)
+    if matched and norm_id(matched.get("student_id", "")):
+        return ("id", norm_id(matched["student_id"]))
+    sid = norm_id(result.get("student_id", ""))
+    if sid:
+        return ("id", sid)
+    name = norm_text(result.get("name", ""))
+    if name:
+        return ("name", name)
+    filename = cell_text(result.get("filename", ""))
+    return ("file", filename)
+
+
+def _question_rank(question: dict[str, Any]) -> tuple[float, int, float, int]:
+    score = float(question.get("score", 0.0) or 0.0)
+    found = 1 if question.get("found") else 0
+    confidence = float(question.get("confidence", 0.0) or 0.0)
+    no_review = 0 if question.get("needs_review") else 1
+    return (score, found, confidence, no_review)
+
+
+def _non_question_review_reasons(result: dict[str, Any]) -> list[str]:
+    question_ids = {str(q.get("id", "")) for q in result.get("questions", [])}
+    reasons = []
+    for reason in result.get("review_reasons", []) or []:
+        text = cell_text(reason)
+        prefix = text.split(":", 1)[0].strip()
+        if prefix in question_ids:
+            continue
+        if "answer not found or not matched" in text or "zero score requires manual review" in text:
+            continue
+        reasons.append(text)
+    return reasons
+
+
+def merge_results_by_student(
+    results: list[dict[str, Any]],
+    answer_key: dict[str, Any],
+    roster: list[dict[str, str]],
+    decimals: int,
+) -> list[dict[str, Any]]:
+    """Merge multiple submitted files from the same student into one final result.
+
+    Each PDF is still graded independently. For the final student-level result,
+    the same question id keeps the best score across that student's files, while
+    different question ids naturally add up through the recomputed total.
+    """
+    if not results:
+        return []
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    order: list[tuple[str, str]] = []
+    for result in results:
+        key = _result_student_group_key(result, roster)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(result)
+
+    merged_results: list[dict[str, Any]] = []
+    for key in order:
+        group = grouped[key]
+        if len(group) == 1:
+            single = copy.deepcopy(group[0])
+            filename = cell_text(single.get("filename", ""))
+            single.setdefault("source_files", [filename] if filename else [])
+            single.setdefault("source_file_count", len(single.get("source_files", [])))
+            merged_results.append(single)
+            continue
+
+        base = copy.deepcopy(group[0])
+        matched = match_roster(base, roster)
+        if matched:
+            student_id = matched.get("student_id", "")
+            name = matched.get("name", "")
+            roster_matched = True
+        else:
+            student_id = cell_text(base.get("student_id", ""))
+            name = cell_text(base.get("name", ""))
+            roster_matched = bool(base.get("roster_matched", False))
+
+        source_files = [cell_text(result.get("filename", "")) for result in group if result.get("filename")]
+        source_files = list(dict.fromkeys(source_files))
+        questions_by_result = [
+            {str(question.get("id", "")): question for question in result.get("questions", [])}
+            for result in group
+        ]
+
+        merged_questions = []
+        regular_total = 0.0
+        bonus_total = 0.0
+        max_total = 0.0
+        review_reasons: list[str] = []
+
+        for key_question in answer_key.get("questions", []):
+            qid = str(key_question.get("id", ""))
+            max_points = float(key_question.get("max_points", 0.0))
+            qtype = key_question.get("type", "unknown")
+            candidates = [
+                questions[qid]
+                for questions in questions_by_result
+                if qid in questions
+            ]
+            if candidates:
+                chosen = copy.deepcopy(max(candidates, key=_question_rank))
+            else:
+                chosen = {
+                    "id": qid,
+                    "type": qtype,
+                    "max_points": max_points,
+                    "score": 0.0,
+                    "found": False,
+                    "confidence": 0.0,
+                    "needs_review": True,
+                    "review_reason": "answer not found or not matched",
+                    "evidence": "",
+                    "feedback": "",
+                }
+
+            chosen["id"] = qid
+            chosen["type"] = qtype
+            chosen["max_points"] = max_points
+            chosen["score"] = clamp_score(chosen.get("score", 0.0), max_points, decimals)
+            supporting_files = []
+            for result, questions in zip(group, questions_by_result):
+                candidate = questions.get(qid)
+                if not candidate:
+                    continue
+                if float(candidate.get("score", 0.0) or 0.0) > 0 or candidate.get("found"):
+                    supporting_files.append(cell_text(result.get("filename", "")))
+            chosen["source_files"] = list(dict.fromkeys(file for file in supporting_files if file))
+            if chosen["source_files"]:
+                chosen["source_file"] = chosen["source_files"][0]
+
+            if chosen.get("needs_review") and cell_text(chosen.get("review_reason", "")):
+                review_reasons.append(f"{qid}: {cell_text(chosen.get('review_reason', ''))}")
+
+            merged_questions.append(chosen)
+            max_total += max_points
+            if qtype == "bonus":
+                bonus_total += float(chosen.get("score", 0.0) or 0.0)
+            else:
+                regular_total += float(chosen.get("score", 0.0) or 0.0)
+
+        for result in group:
+            review_reasons.extend(_non_question_review_reasons(result))
+
+        unreadable_files = [
+            cell_text(result.get("filename", ""))
+            for result in group
+            if cell_text(result.get("answer_quality", "")).lower() == "unreadable"
+        ]
+        if unreadable_files:
+            review_reasons.append(f"some submitted files failed or unreadable: {'; '.join(unreadable_files)}")
+
+        recognition_values = [float(result.get("recognition_confidence", 0.0) or 0.0) for result in group]
+        grading_values = [float(result.get("grading_confidence", 0.0) or 0.0) for result in group]
+        source_diagnostics = [result.get("_diagnostics") or {} for result in group]
+        total_seconds = sum(float(item.get("total_seconds", 0.0) or 0.0) for item in source_diagnostics)
+        diagnostic_errors = [
+            cell_text(item.get("error", ""))
+            for item in source_diagnostics
+            if item.get("error")
+        ]
+        regular_score = round(regular_total, decimals)
+        bonus_score = round(bonus_total, decimals)
+        merged = {
+            **base,
+            "student_id": student_id,
+            "name": name,
+            "filename": "; ".join(source_files),
+            "source_files": source_files,
+            "source_file_count": len(source_files),
+            "roster_matched": roster_matched,
+            "questions": merged_questions,
+            "regular_score": regular_score,
+            "bonus_score": bonus_score,
+            "total_score": round(regular_score + bonus_score, decimals),
+            "max_score": round(max_total, decimals),
+            "recognition_confidence": round(max(recognition_values) if recognition_values else 0.0, 3),
+            "grading_confidence": round(max(grading_values) if grading_values else 0.0, 3),
+            "answer_quality": "merged",
+            "needs_review": bool(review_reasons) or any(question.get("needs_review") for question in merged_questions),
+            "review_reasons": sorted(set(reason for reason in review_reasons if reason)),
+            "overall_feedback": f"Merged {len(source_files)} submitted files. Same question ids use the highest score.",
+            "_diagnostics": {
+                "status": "merged",
+                "source_file_count": len(source_files),
+                "total_seconds": round(total_seconds, 2),
+                "error": "; ".join(diagnostic_errors),
+                "error_type": "merged_with_source_errors" if diagnostic_errors else "",
+            },
+        }
+        if len(unreadable_files) == len(group):
+            merged["answer_quality"] = "unreadable"
+        merged_results.append(merged)
+
+    merged_count = len(results) - len(merged_results)
+    if merged_count > 0:
+        print(f"Merged {len(results)} file-level result(s) into {len(merged_results)} student result(s).")
+    return merged_results
+
+
 def error_result(pdf: Path, message: str, answer_key: dict[str, Any]) -> dict[str, Any]:
     sid, name = filename_identity(pdf.name)
     message = redact_sensitive_text(message)
@@ -1350,7 +1555,7 @@ def is_reusable_result(result: dict[str, Any]) -> bool:
 
 def load_existing_results(output_dir: Path) -> dict[str, dict[str, Any]]:
     existing: dict[str, dict[str, Any]] = {}
-    for name in ("results.json", "partial_results.json"):
+    for name in ("file_results.json", "partial_results.json", "results.json"):
         path = output_dir / name
         if not path.exists():
             continue
@@ -1447,6 +1652,7 @@ def write_details_xlsx(path: Path, results: list[dict[str, Any]]) -> None:
             "复核原因",
             "证据",
             "反馈",
+            "来源文件",
         ]
     ]
     for result in results:
@@ -1466,6 +1672,7 @@ def write_details_xlsx(path: Path, results: list[dict[str, Any]]) -> None:
                     redact_sensitive_text(question.get("review_reason", "")),
                     redact_sensitive_text(question.get("evidence", "")),
                     redact_sensitive_text(question.get("feedback", "")),
+                    "; ".join(question.get("source_files", []) or [question.get("source_file", "")]),
                 ]
             )
     write_xlsx(path, [("Summary", summary), ("QuestionDetails", question_sheet)])
@@ -1501,7 +1708,7 @@ def write_details_md(path: Path, answer_key: dict[str, Any], results: list[dict[
             [
                 f"## {result.get('student_id', '')} {result.get('name', '')}",
                 "",
-                f"- 文件：{result.get('filename', '')}",
+                f"- 文件：{'; '.join(result.get('source_files', [])) or result.get('filename', '')}",
                 f"- 总分：{result.get('total_score', '')} / {result.get('max_score', '')}",
                 f"- 需复核：{review}",
                 f"- 复核原因：{redact_sensitive_text('; '.join(result.get('review_reasons', []))) or '无'}",
@@ -1951,7 +2158,7 @@ def main() -> int:
         if existing_results and args.resume:
             print(f"Found {len(existing_results)} reusable existing result(s).")
 
-        results = run_grading_pipeline(
+        file_results = run_grading_pipeline(
             ai=ai,
             student_pdfs=student_pdfs,
             answer_key=answer_key,
@@ -1968,10 +2175,13 @@ def main() -> int:
             existing_results=existing_results,
             max_new_pdfs=args.max_pdfs,
         )
+        results = merge_results_by_student(file_results, answer_key, roster, args.score_decimals)
 
         if results:
             results[0]["_score_decimals"] = args.score_decimals
+        file_results = sanitize_for_output(file_results)
         results = sanitize_for_output(results)
+        (output_dir / "file_results.json").write_text(json.dumps(file_results, ensure_ascii=False, indent=2), encoding="utf-8")
         (output_dir / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
         write_clean_grades(output_dir / "总成绩_三列表.xlsx", results, roster, args.blank_review_scores)
         write_details_xlsx(output_dir / "批改明细.xlsx", results)
@@ -1990,7 +2200,7 @@ def main() -> int:
         else:
             clean_compact_output_files(output_dir)
         write_rate_analysis_files(output_dir, rate_limiter, run_started_at, write_json=args.output_profile == "full")
-        write_submission_diagnostics(output_dir, results, write_json=args.output_profile == "full")
+        write_submission_diagnostics(output_dir, file_results, write_json=args.output_profile == "full")
 
         print("\nDone.")
         print(f"Clean grade workbook: {output_dir / '总成绩_三列表.xlsx'}")
