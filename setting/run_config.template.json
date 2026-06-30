@@ -85,7 +85,7 @@
   "answer": "answers/example_answer.pdf",
   "submissions": "homework/example_submissions.zip",
   "roster": "homework/roster.xlsx",
-  "output_dir": "output",
+  "output_dir": "output/example_results",
   "answer_key_json": null,
   "refresh_answer_key": false,
 

@@ -539,6 +539,15 @@ class AIBackend:
 - 你会看到该 PDF 渲染出的前 {len(images)} 页图片。
 - 如果页面疑似不完整、被截断或有后续页没有看到，请在结果中降低 confidence 并设置 needs_review。
 - 只输出一个 JSON 对象，不要输出 Markdown。
+- 不要使用 ```json 代码块。
+- 不要输出解释、分析、前缀或后缀文字。
+- 所有 key 必须使用英文双引号。
+- 所有字符串必须使用英文双引号。
+- 不要使用中文引号。
+- 不要使用尾随逗号。
+- 不要输出 NaN、Infinity、None、True、False；必须使用 null、true、false。
+- 如果字段无法判断，使用 null、空字符串或空数组，不要省略必需字段。
+- 输出必须能被 Python json.loads() 直接解析。
 - JSON 必须符合这个 schema:
 {schema_text}
 """
