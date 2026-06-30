@@ -3,13 +3,13 @@
 
 用法:
   # 抓取所有学生
-  python fetch_grades.py --config grading_config.json --mode all
+  python src/fetch_grades.py --config setting/run_config.json --mode all
 
   # 仅抓取有成绩的学生
-  python fetch_grades.py --config grading_config.json --mode graded
+  python src/fetch_grades.py --config setting/run_config.json --mode graded
 
   # 仅抓取已提交作业的学生
-  python fetch_grades.py --config grading_config.json --mode submitted
+  python src/fetch_grades.py --config setting/run_config.json --mode submitted
 
 输出:
   canvas_grades_{作业名}.xlsx — 三列: 学号、姓名、成绩
@@ -141,7 +141,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     # 配置文件
-    parser.add_argument("--config", help="JSON 配置文件路径（grading_config.json）")
+    parser.add_argument("--config", help="JSON 配置文件路径（例如 setting/run_config.json）")
 
     # Canvas 连接参数（可覆盖配置文件）
     parser.add_argument("--canvas-token", default=os.getenv("CANVAS_API_TOKEN"),
@@ -158,7 +158,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="抓取模式: all=所有学生, graded=有成绩的学生, submitted=已提交的学生。默认 all。")
 
     # 输出
-    parser.add_argument("--output-dir", default=".", help="输出目录。默认当前目录。")
+    parser.add_argument("--output-dir", default="output", help="输出目录。默认 output。")
 
     args = parser.parse_args(argv)
 

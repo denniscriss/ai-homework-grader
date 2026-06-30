@@ -6,19 +6,19 @@ existing AI grading pipeline, and uploads scores + feedback comments back.
 
 Usage:
   # Full pipeline: fetch -> grade -> upload
-  python canvas_integration.py --config grading_config.json
+  python src/canvas_integration.py --config setting/run_config.json
 
   # Fetch submissions only (verify downloads work)
-  python canvas_integration.py --config grading_config.json --canvas-fetch-only
+  python src/canvas_integration.py --config setting/run_config.json --canvas-fetch-only
 
   # Grade but don't upload (review before publishing)
-  python canvas_integration.py --config grading_config.json --canvas-skip-upload
+  python src/canvas_integration.py --config setting/run_config.json --canvas-skip-upload
 
   # Upload from existing results.json (re-upload after fixing)
-  python canvas_integration.py --config grading_config.json --canvas-upload-only
+  python src/canvas_integration.py --config setting/run_config.json --canvas-upload-only
 
   # Preview what would be uploaded without actually sending
-  python canvas_integration.py --config grading_config.json --canvas-dry-run-upload
+  python src/canvas_integration.py --config setting/run_config.json --canvas-dry-run-upload
 """
 
 from __future__ import annotations
@@ -39,23 +39,29 @@ import httpx
 
 # Reuse the grading core from the existing script
 from grade_homework_skill_patch import (
+    ApiRateLimiter,
     AIBackend,
     answer_key_schema,
     apply_point_allocation,
     error_result,
-    extract_answer_key,
     filename_identity,
     grading_schema,
+    load_or_extract_answer_key,
+    load_existing_results,
     make_ai_backend,
     norm_id,
     norm_text,
     normalize_result,
     read_roster,
     run_grading_pipeline,
+    sanitize_for_output,
     write_class_analysis_md,
+    clean_compact_output_files,
     write_clean_grades,
     write_details_md,
     write_details_xlsx,
+    write_rate_analysis_files,
+    write_submission_diagnostics,
     write_review_xlsx,
 )
 
@@ -446,14 +452,6 @@ def format_feedback_comment(
     answer_key: dict[str, Any],
 ) -> str:
     """Build a human-like Canvas submission comment. Natural tone, no AI flavor."""
-    total = result.get("total_score", 0)
-    max_pts = result.get("max_score", 0)
-    try:
-        total = round(float(total), 1)
-        max_pts = round(float(max_pts), 1)
-    except (TypeError, ValueError):
-        pass
-
     # Collect problem questions (lost > 20% or flagged)
     problem_qids: list[str] = []
     for q in result.get("questions", []):
@@ -469,8 +467,6 @@ def format_feedback_comment(
 
     qids = "、".join(problem_qids)
     return f"第{qids}题有问题，请查看。"
-
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +550,7 @@ def review_flagged_questions(
     results: list[dict[str, Any]],
     answer_key: dict[str, Any],
     extra_scoring_rules: str,
+    rate_limiter: ApiRateLimiter | None = None,
 ) -> list[dict[str, Any]]:
     """Re-evaluate questions flagged as needs_review with a focused second AI pass.
 
@@ -562,6 +559,10 @@ def review_flagged_questions(
     """
     # Build per-question lookup from answer_key
     key_questions = {str(q.get("id", "")): q for q in answer_key.get("questions", [])}
+
+    def is_question_review_reason(reason: Any) -> bool:
+        prefix, separator, _ = str(reason).partition(":")
+        return bool(separator) and prefix.strip() in key_questions
 
     review_count = 0
     for result in results:
@@ -606,6 +607,8 @@ def review_flagged_questions(
 输出 JSON: {{"score": 数字, "confidence": 数字(0-1), "reasoning": "重新判分理由(中文,100字以内)"}}
 """
             try:
+                if rate_limiter:
+                    rate_limiter.wait("review")
                 text = ai.text(prompt)
                 # Parse JSON from response
                 obj = _extract_json(text)
@@ -639,20 +642,30 @@ def review_flagged_questions(
 
     # Recompute total scores after adjustments
     for result in results:
-        regular = sum(q["score"] for q in result["questions"] if q.get("type") != "bonus")
-        bonus = sum(q["score"] for q in result["questions"] if q.get("type") == "bonus")
+        questions = result.get("questions", [])
+        regular = sum(float(q.get("score", 0) or 0) for q in questions if q.get("type") != "bonus")
+        bonus = sum(float(q.get("score", 0) or 0) for q in questions if q.get("type") == "bonus")
         result["regular_score"] = round(regular, 2)
         result["bonus_score"] = round(bonus, 2)
         result["total_score"] = round(regular + bonus, 2)
 
-        # Re-evaluate overall needs_review
-        any_review = any(q.get("needs_review") for q in result.get("questions", []))
-        if not any_review:
-            # Clear overall review flags only if all questions passed
-            old_needed = result.get("needs_review", False)
-            result["needs_review"] = bool(result.get("review_reasons"))
-            if old_needed and not result["needs_review"]:
-                result["review_reasons"] = []
+        # Rebuild question-level review reasons from current question flags.
+        # Preserve non-question reasons such as identity mismatches.
+        preserved_reasons = [
+            str(reason)
+            for reason in result.get("review_reasons", [])
+            if reason and not is_question_review_reason(reason)
+        ]
+        current_question_reasons = []
+        for q in questions:
+            if not q.get("needs_review"):
+                continue
+            qid = str(q.get("id", ""))
+            reason = str(q.get("review_reason", "")).strip() or "still needs manual review"
+            current_question_reasons.append(f"{qid}: {reason}")
+
+        result["review_reasons"] = sorted(set(preserved_reasons + current_question_reasons))
+        result["needs_review"] = bool(result["review_reasons"]) or any(q.get("needs_review") for q in questions)
 
     return results
 
@@ -799,7 +812,7 @@ def _regenerate_output_files(output_dir: Path, args: argparse.Namespace) -> int:
     if not answer_key_path.exists():
         raise SystemExit(f"answer_key.json not found at {answer_key_path}")
 
-    results = json.loads(results_path.read_text(encoding="utf-8"))
+    results = sanitize_for_output(json.loads(results_path.read_text(encoding="utf-8")))
     answer_key = json.loads(answer_key_path.read_text(encoding="utf-8"))
     local_roster = read_roster(args.roster) if args.roster else None
 
@@ -818,9 +831,12 @@ def _regenerate_output_files(output_dir: Path, args: argparse.Namespace) -> int:
         try:
             ai_args = argparse.Namespace(
                 api_key=args.api_key, base_url=args.base_url, model=args.model,
-                backend=args.backend, render_dpi=args.render_dpi,
-                max_render_pages=args.max_render_pages,
+                backend=args.backend, api_timeout=args.api_timeout,
+                api_max_retries=args.api_max_retries,
+                render_dpi=args.render_dpi, max_render_pages=args.max_render_pages,
+                render_timeout=args.render_timeout,
                 chat_json_mode=not args.no_chat_json_mode, trust_env=args.trust_env,
+                verbose=args.verbose,
             )
             ai = make_ai_backend_standalone(ai_args, output_dir)
             write_class_analysis_md(
@@ -982,6 +998,7 @@ def export_canvas_grades(
 
 def integrated_main(args: argparse.Namespace) -> int:
     """Run the full Canvas → grade → Canvas pipeline."""
+    run_started_at = time.time()
 
     # --- Setup output directory ---
     output_dir = Path(args.output_dir).expanduser().resolve()
@@ -1109,15 +1126,12 @@ def integrated_main(args: argparse.Namespace) -> int:
             print("No PDFs downloaded. Exiting.")
             return 0
 
-        if args.max_pdfs:
-            student_pdfs = student_pdfs[:args.max_pdfs]
-
         # --- Upload-only: load existing results and skip AI entirely ---
         if args.canvas_upload_only:
             results_path = output_dir / "results.json"
             if not results_path.exists():
                 raise SystemExit(f"results.json not found at {results_path}. Cannot use --canvas-upload-only.")
-            results = json.loads(results_path.read_text(encoding="utf-8"))
+            results = sanitize_for_output(json.loads(results_path.read_text(encoding="utf-8")))
             answer_key_path = output_dir / "answer_key.json"
             answer_key = json.loads(answer_key_path.read_text(encoding="utf-8")) if answer_key_path.exists() else {}
             print(f"Loaded {len(results)} existing results from {results_path}")
@@ -1130,26 +1144,42 @@ def integrated_main(args: argparse.Namespace) -> int:
                 base_url=args.base_url,
                 model=args.model,
                 backend=args.backend,
+                api_timeout=args.api_timeout,
+                api_max_retries=args.api_max_retries,
                 render_dpi=args.render_dpi,
                 max_render_pages=args.max_render_pages,
+                render_timeout=args.render_timeout,
                 chat_json_mode=not args.no_chat_json_mode,
                 trust_env=args.trust_env,
+                verbose=args.verbose,
             )
             ai = make_ai_backend_standalone(ai_args, work_root)
+            rate_limiter = ApiRateLimiter(args.requests_per_minute)
+            if rate_limiter.enabled:
+                print(f"AI request rate limit: {rate_limiter.limit} requests/minute")
             if args.answer_key_json:
                 answer_key = json.loads(Path(args.answer_key_json).read_text(encoding="utf-8"))
+                answer_key = apply_point_allocation(
+                    answer_key, args.regular_points, args.bonus_points, args.point_mode, args.score_decimals
+                )
+                (output_dir / "answer_key.json").write_text(
+                    json.dumps(answer_key, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
             elif args.answer:
                 answer_pdf = Path(args.answer).expanduser().resolve()
-                print("Extracting answer key with AI...")
-                answer_key = extract_answer_key(ai, answer_pdf, args.regular_points, args.bonus_points)
+                answer_key = load_or_extract_answer_key(
+                    ai=ai,
+                    answer_pdf=answer_pdf,
+                    output_dir=output_dir,
+                    regular_points=args.regular_points,
+                    bonus_points=args.bonus_points,
+                    point_mode=args.point_mode,
+                    score_decimals=args.score_decimals,
+                    refresh_answer_key=args.refresh_answer_key,
+                    rate_limiter=rate_limiter,
+                )
             else:
                 raise SystemExit("Provide --answer or --answer-key-json for the reference answer PDF.")
-            answer_key = apply_point_allocation(
-                answer_key, args.regular_points, args.bonus_points, args.point_mode, args.score_decimals
-            )
-            (output_dir / "answer_key.json").write_text(
-                json.dumps(answer_key, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
 
             # --- Grade ---
             extra_rules = build_extra_scoring_rules() if not args.no_ta_scoring else ""
@@ -1157,6 +1187,9 @@ def integrated_main(args: argparse.Namespace) -> int:
             print(f"Grading {len(student_pdfs)} student PDFs...")
             if extra_rules:
                 print("TA scoring rules: regular lenient (-0.1/minor), bonus strict (-0.5/wrong)")
+            existing_results = load_existing_results(output_dir) if args.resume else {}
+            if existing_results and args.resume:
+                print(f"Found {len(existing_results)} reusable existing result(s).")
             results = run_grading_pipeline(
                 ai=ai,
                 student_pdfs=student_pdfs,
@@ -1170,13 +1203,17 @@ def integrated_main(args: argparse.Namespace) -> int:
                 score_decimals=args.score_decimals,
                 review_zero_scores=args.review_zero_scores,
                 extra_scoring_rules=extra_rules,
+                max_workers=args.max_workers,
+                rate_limiter=rate_limiter,
+                existing_results=existing_results,
+                max_new_pdfs=args.max_pdfs,
             )
 
             # --- Second-pass AI review for flagged questions ---
             if not args.no_review_pass:
                 print("=" * 60)
                 print("Second-pass review for flagged questions...")
-                review_flagged_questions(ai, results, answer_key, extra_rules)
+                review_flagged_questions(ai, results, answer_key, extra_rules, rate_limiter=rate_limiter)
 
             # --- Attach canvas_user_id to each result ---
             for result in results:
@@ -1193,6 +1230,7 @@ def integrated_main(args: argparse.Namespace) -> int:
             # --- Write output files ---
             if results:
                 results[0]["_score_decimals"] = args.score_decimals
+            results = sanitize_for_output(results)
             (output_dir / "results.json").write_text(
                 json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -1201,15 +1239,26 @@ def integrated_main(args: argparse.Namespace) -> int:
             )
             write_details_xlsx(output_dir / "批改明细.xlsx", results)
             write_review_xlsx(output_dir / "人工复核.xlsx", results)
-            write_details_md(output_dir / "批改详情.md", answer_key, results)
-            write_class_analysis_md(
-                output_dir / "班级分析.md",
-                None if args.no_ai_analysis else ai,
-                answer_key,
-                results,
-                args.no_ai_analysis,
-                args.analysis_max_students,
+            if args.output_profile == "full":
+                write_details_md(output_dir / "批改详情.md", answer_key, results)
+                write_class_analysis_md(
+                    output_dir / "班级分析.md",
+                    None if args.no_ai_analysis else ai,
+                    answer_key,
+                    results,
+                    args.no_ai_analysis,
+                    args.analysis_max_students,
+                    rate_limiter=rate_limiter,
+                )
+            else:
+                clean_compact_output_files(output_dir)
+            write_rate_analysis_files(
+                output_dir,
+                rate_limiter,
+                run_started_at,
+                write_json=args.output_profile == "full",
             )
+            write_submission_diagnostics(output_dir, results, write_json=args.output_profile == "full")
 
         # --- Upload grades to Canvas ---
         if args.canvas_skip_upload:
@@ -1294,6 +1343,7 @@ def make_ai_backend_standalone(args: argparse.Namespace, work_root: Path) -> AIB
     client_kwargs: dict[str, Any] = {"api_key": args.api_key}
     if args.base_url:
         client_kwargs["base_url"] = args.base_url
+    client_kwargs["max_retries"] = int(getattr(args, "api_max_retries", 0))
 
     trust_env = args.trust_env
     # Honor env var AI_GRADER_TRUST_ENV if trust_env not explicitly set
@@ -1304,7 +1354,7 @@ def make_ai_backend_standalone(args: argparse.Namespace, work_root: Path) -> AIB
         else:
             trust_env = False if args.base_url else True
 
-    client_kwargs["http_client"] = httpx.Client(timeout=120.0, trust_env=trust_env)
+    client_kwargs["http_client"] = httpx.Client(timeout=float(args.api_timeout), trust_env=trust_env)
     from openai import OpenAI
     client = OpenAI(**client_kwargs)
     return AIBackend(
@@ -1314,7 +1364,9 @@ def make_ai_backend_standalone(args: argparse.Namespace, work_root: Path) -> AIB
         work_root=work_root,
         render_dpi=args.render_dpi,
         max_render_pages=args.max_render_pages,
+        render_timeout=args.render_timeout,
         chat_json_mode=args.chat_json_mode,
+        verbose=getattr(args, "verbose", False),
     )
 
 
@@ -1367,6 +1419,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     input_group = parser.add_argument_group("Answer and input")
     input_group.add_argument("--answer", help="Reference-answer PDF path.")
     input_group.add_argument("--answer-key-json", help="Use a pre-extracted answer key JSON (skip AI extraction).")
+    input_group.add_argument("--refresh-answer-key", action="store_true",
+                             help="Ignore cached answer_key.json and re-extract the answer key with AI.")
     input_group.add_argument("--roster", help="Optional local .xlsx roster with student_id (学号) and name columns. Merges with Canvas data to fill missing student IDs.")
 
     # ---- AI provider ----
@@ -1376,6 +1430,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                           default=os.getenv("AI_GRADER_BACKEND", "responses"))
     ai_group.add_argument("--api-key", default=os.getenv("AI_GRADER_API_KEY") or os.getenv("OPENAI_API_KEY"))
     ai_group.add_argument("--base-url", default=os.getenv("AI_GRADER_BASE_URL") or os.getenv("OPENAI_BASE_URL"))
+    ai_group.add_argument("--api-timeout", type=float, default=float(os.getenv("AI_GRADER_API_TIMEOUT", "120")))
+    ai_group.add_argument("--api-max-retries", type=int, default=int(os.getenv("AI_GRADER_API_MAX_RETRIES", "0")),
+                          help="OpenAI SDK automatic retry count. Default 0 avoids long retry stalls.")
 
     # ---- Scoring ----
     score_group = parser.add_argument_group("Scoring")
@@ -1397,18 +1454,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     vis_group = parser.add_argument_group("Chat-vision rendering")
     vis_group.add_argument("--render-dpi", type=int, default=160)
     vis_group.add_argument("--max-render-pages", type=int, default=12)
+    vis_group.add_argument("--render-timeout", type=float, default=float(os.getenv("AI_GRADER_RENDER_TIMEOUT", "120")))
     vis_group.add_argument("--no-chat-json-mode", action="store_true")
 
     # ---- Analysis & output ----
     out_group = parser.add_argument_group("Output")
-    out_group.add_argument("--output-dir", default="outputs")
+    out_group.add_argument("--output-dir", default="output")
     out_group.add_argument("--no-ai-analysis", action="store_true")
     out_group.add_argument("--analysis-max-students", type=int, default=120)
     out_group.add_argument("--max-pdfs", type=int, help="Limit number of PDFs to process (for testing).")
+    out_group.add_argument("--max-workers", type=int, default=1,
+                           help="Maximum number of student PDFs to grade concurrently. Default 1 keeps serial behavior.")
+    out_group.add_argument("--requests-per-minute", type=float, default=0.0,
+                           help="Global AI request limit per minute for grading/review/analysis. 0 means unlimited.")
+    out_group.add_argument("--output-profile", choices=["compact", "full"],
+                           default=os.getenv("AI_GRADER_OUTPUT_PROFILE", "compact"),
+                           help="compact writes essential outputs; full writes all debug/report files.")
+    out_group.add_argument("--resume", action="store_true", dest="resume", default=True,
+                           help="Reuse existing successful results from results.json/partial_results.json. Enabled by default.")
+    out_group.add_argument("--no-resume", action="store_false", dest="resume",
+                           help="Ignore existing results and grade every submission again.")
 
     # ---- Misc ----
     misc_group = parser.add_argument_group("Miscellaneous")
     misc_group.add_argument("--keep-workdir", action="store_true")
+    misc_group.add_argument("--verbose", action="store_true", help="Show per-file rendering/API diagnostic logs.")
     misc_group.add_argument("--trust-env", action="store_true", dest="trust_env", default=None)
     misc_group.add_argument("--no-trust-env", action="store_false", dest="trust_env")
 
@@ -1446,6 +1516,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise SystemExit("Missing --canvas-assignment-id or CANVAS_ASSIGNMENT_ID env var.")
     if not args.canvas_upload_only and not args.canvas_export_grades and not args.answer and not args.answer_key_json:
         raise SystemExit("Provide --answer or --answer-key-json for the reference answer PDF.")
+    if args.max_workers < 1:
+        raise SystemExit("--max-workers must be >= 1.")
+    if args.requests_per_minute < 0:
+        raise SystemExit("--requests-per-minute must be >= 0.")
+    if args.api_timeout <= 0:
+        raise SystemExit("--api-timeout must be > 0.")
+    if args.api_max_retries < 0:
+        raise SystemExit("--api-max-retries must be >= 0.")
+    if args.render_timeout <= 0:
+        raise SystemExit("--render-timeout must be > 0.")
 
     return args
 

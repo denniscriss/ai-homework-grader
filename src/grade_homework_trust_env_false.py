@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--answer", help="Reference-answer PDF. Overrides automatic detection.")
     parser.add_argument("--submissions", "--students", "--student-pdf", dest="submissions", help="Zip, folder, or single PDF containing student submissions.")
     parser.add_argument("--roster", help="Optional .xlsx roster/template with student ID and name columns.")
-    parser.add_argument("--output-dir", default="outputs", help="Directory for generated reports.")
+    parser.add_argument("--output-dir", default="output", help="Directory for generated reports.")
     parser.add_argument("--model", default=os.getenv("AI_GRADER_MODEL", "gpt-5.1"))
     parser.add_argument("--backend", choices=["responses", "chat-vision"], default=os.getenv("AI_GRADER_BACKEND", "responses"), help="AI API mode: responses sends PDFs directly; chat-vision renders PDFs to images for OpenAI-compatible chat/vision APIs.")
     parser.add_argument("--api-key", default=os.getenv("AI_GRADER_API_KEY") or os.getenv("OPENAI_API_KEY"), help="API key. Defaults to AI_GRADER_API_KEY or OPENAI_API_KEY.")

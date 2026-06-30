@@ -1,0 +1,141 @@
+{
+  "_template_note": [
+    "This is a reference template. Copy it to setting/run_config.json before running.",
+    "Fields starting with '_' are documentation only and are ignored by the program.",
+    "The real runnable config is the top-level fields after _help_by_section.",
+    "Keep API keys out of this file. Put private values in setting/api_env.sh."
+  ],
+  "_quick_start": {
+    "local_mode": "Set mode=local, then fill answer, submissions, optional roster, and output_dir.",
+    "canvas_mode": "Set mode=canvas, then fill answer plus canvas_course_id/canvas_assignment_id. Put CANVAS_API_TOKEN in setting/api_env.sh.",
+    "run_default": "./run.sh",
+    "run_with_another_config": "./run.sh setting/my_hw_config.json",
+    "dry_run_without_ai": "./run.sh --dry-run-discover"
+  },
+  "_help_by_section": {
+    "01_mode_and_files": {
+      "mode": "local uses local files; canvas downloads/uploads through Canvas.",
+      "answer": "Reference-answer PDF path. Required unless answer_key_json is provided.",
+      "submissions": "Student ZIP/folder/single PDF. Used only in local mode.",
+      "roster": "Optional xlsx/csv roster for student id/name matching.",
+      "output_dir": "Output directory for workbooks, JSON cache, and diagnostics. Default recommendation: output.",
+      "answer_key_json": "Optional extracted answer-key JSON. Skips AI answer extraction.",
+      "refresh_answer_key": "true forces re-extracting the answer key even if output_dir has answer_key.json."
+    },
+    "02_ai_provider": {
+      "backend": "chat-vision renders PDFs to images; responses sends PDFs directly to Responses API.",
+      "model": "Model name. Prefer setting AI_GRADER_MODEL in setting/api_env.sh.",
+      "api_key": "Do not put secrets here. Prefer AI_GRADER_API_KEY in setting/api_env.sh.",
+      "base_url": "OpenAI-compatible endpoint. Prefer AI_GRADER_BASE_URL in setting/api_env.sh.",
+      "api_timeout": "AI API timeout per request, in seconds.",
+      "api_max_retries": "OpenAI SDK retry count. 0 avoids long stalls on failed requests.",
+      "trust_env": "Whether httpx reads proxy/TLS env vars. false is usually better for school/local endpoints."
+    },
+    "03_pdf_rendering": {
+      "render_dpi": "Image DPI for chat-vision. Higher is clearer but slower and more token-heavy.",
+      "max_render_pages": "Maximum pages sent per student PDF in chat-vision mode.",
+      "render_timeout": "PDF rendering timeout per submission, in seconds.",
+      "no_chat_json_mode": "true disables response_format=json_object for providers that do not support it."
+    },
+    "04_scoring": {
+      "point_mode": "total means regular_points/bonus_points are total pools; per-question means each question max.",
+      "regular_points": "Regular-question points according to point_mode.",
+      "bonus_points": "Bonus-question points according to point_mode.",
+      "grading_mode": "standard, lenient, or strict.",
+      "review_threshold": "Confidence below this value is flagged for manual review.",
+      "score_decimals": "Decimal places for exported scores.",
+      "review_zero_scores": "true flags zero-score questions for review.",
+      "blank_review_scores": "true leaves reviewed students blank in the clean grade workbook."
+    },
+    "05_speed_and_resume": {
+      "max_pdfs": "Maximum new submissions to grade in this run. Existing reusable results do not count.",
+      "max_workers": "Concurrent grading workers.",
+      "requests_per_minute": "Local request-count limiter. This does not limit token/minute.",
+      "resume": "true reuses successful existing results and reruns failed/timeout/unreadable ones."
+    },
+    "06_output_and_debug": {
+      "output_profile": "compact keeps essential files; full keeps extra markdown/json diagnostics.",
+      "no_ai_analysis": "true skips AI class analysis.",
+      "analysis_max_students": "Maximum students used in AI class analysis.",
+      "dry_run_discover": "true only checks input discovery and does not call AI.",
+      "keep_workdir": "true keeps temporary extraction/render folders.",
+      "verbose": "true prints per-file render/API diagnostic logs."
+    },
+    "07_canvas_only": {
+      "canvas_token": "Do not put secrets here. Prefer CANVAS_API_TOKEN in setting/api_env.sh.",
+      "canvas_url": "Canvas API base URL.",
+      "canvas_course_id": "Canvas course id. Required in canvas mode.",
+      "canvas_assignment_id": "Canvas assignment id. Required in canvas mode.",
+      "canvas_fetch_only": "Download submissions only.",
+      "canvas_upload_only": "Upload from existing results.json only.",
+      "canvas_dry_run_upload": "Preview upload without writing to Canvas.",
+      "canvas_skip_upload": "Grade and generate reports, but skip Canvas upload.",
+      "canvas_overwrite_grades": "Overwrite grades already present in Canvas.",
+      "canvas_ungraded_only": "Only process ungraded Canvas submissions.",
+      "canvas_student_slice": "Optional Python slice such as 0:45 or 45:90 for batch division.",
+      "no_review_pass": "Skip Canvas second-pass AI review.",
+      "no_ta_scoring": "Disable Canvas TA-specific scoring rules.",
+      "regenerate_excel": "Regenerate output files from existing results.json.",
+      "canvas_export_grades": "Export existing Canvas grades only."
+    }
+  },
+
+  "mode": "local",
+
+  "answer": "answers/example_answer.pdf",
+  "submissions": "homework/example_submissions.zip",
+  "roster": "homework/roster.xlsx",
+  "output_dir": "output",
+  "answer_key_json": null,
+  "refresh_answer_key": false,
+
+  "backend": "chat-vision",
+  "model": null,
+  "api_key": null,
+  "base_url": null,
+  "api_timeout": 120,
+  "api_max_retries": 0,
+  "trust_env": null,
+
+  "render_dpi": 160,
+  "max_render_pages": 12,
+  "render_timeout": 120,
+  "no_chat_json_mode": false,
+
+  "point_mode": "total",
+  "regular_points": 10,
+  "bonus_points": 0,
+  "grading_mode": "standard",
+  "review_threshold": 0.75,
+  "score_decimals": 2,
+  "review_zero_scores": true,
+  "blank_review_scores": false,
+
+  "max_pdfs": null,
+  "max_workers": 1,
+  "requests_per_minute": 0,
+  "resume": true,
+
+  "output_profile": "compact",
+  "no_ai_analysis": false,
+  "analysis_max_students": 120,
+  "dry_run_discover": false,
+  "keep_workdir": false,
+  "verbose": false,
+
+  "canvas_token": null,
+  "canvas_url": "https://oc.sjtu.edu.cn/api/v1",
+  "canvas_course_id": null,
+  "canvas_assignment_id": null,
+  "canvas_fetch_only": false,
+  "canvas_upload_only": false,
+  "canvas_dry_run_upload": false,
+  "canvas_skip_upload": false,
+  "canvas_overwrite_grades": false,
+  "canvas_ungraded_only": false,
+  "canvas_student_slice": null,
+  "no_review_pass": false,
+  "no_ta_scoring": false,
+  "regenerate_excel": false,
+  "canvas_export_grades": false
+}

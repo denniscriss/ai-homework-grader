@@ -86,11 +86,13 @@
 
 | 文件 | 用途 |
 |---|---|
-| `grade_homework_skill_patch.py` | 核心批改脚本，可独立运行（不依赖 Canvas） |
-| `canvas_integration.py` | Canvas LMS 集成模块，编排"获取 → 批改 → 上传"全流程 |
-| `fetch_grades.py` | 从 Canvas 抓取成绩并导出三列 Excel（学号、姓名、成绩），支持按模式筛选 |
+| `run.sh` | 统一启动脚本，默认读取 `setting/run_config.json` |
+| `src/grade_homework_skill_patch.py` | 核心批改脚本，可独立运行（不依赖 Canvas） |
+| `src/canvas_integration.py` | Canvas LMS 集成模块，编排"获取 → 批改 → 上传"全流程 |
+| `src/fetch_grades.py` | 从 Canvas 抓取成绩并导出三列 Excel（学号、姓名、成绩），支持按模式筛选 |
+| `setting/run_config.template.json` | 运行配置模板，包含本地/Canvas 两种模式的常用选项说明 |
+| `setting/env.template.sh` | API/Canvas 环境变量模板，复制为 `setting/api_env.sh` 后填写私密信息 |
 | `SKILL.auto-homework-grader.patch.md` | Codex Skill 配置说明（供 AI 辅助使用时参考） |
-| `grading_config.json` | Canvas 批改配置文件（需自行创建，见下） |
 | `.gitignore` | Git 忽略规则，排除 PDF / Excel / 成绩数据 |
 | `README.md` | 本说明文档 |
 
@@ -116,111 +118,103 @@ python -m pip install "openai>=2.0.0" httpx openpyxl
 
 ### 1. 安装依赖
 
-```powershell
+```bash
 python -m pip install "openai>=2.0.0" httpx openpyxl
 ```
 
 确认 `pdftoppm` 可用：
 
-```powershell
+```bash
 pdftoppm -v
 ```
 
-### 2. 配置 API
+### 2. 创建私密环境变量
 
-**AI 批改接口**（必需）：
+复制模板：
 
-```powershell
-$env:AI_GRADER_API_KEY  = "xxxxx"
-$env:AI_GRADER_BASE_URL = "https://your-provider.example/api/v1"
-$env:AI_GRADER_MODEL    = "qwen"
+```bash
+cp setting/env.template.sh setting/api_env.sh
 ```
 
-**Canvas API 令牌**（仅 Canvas 集成模式需要）：
+然后编辑 `setting/api_env.sh`：
 
-```powershell
-$env:CANVAS_API_TOKEN = "your_canvas_access_token"
+```bash
+export AI_GRADER_API_KEY="你的 AI API key"
+export AI_GRADER_BASE_URL="学校或服务商的 /v1 地址"
+export AI_GRADER_MODEL="模型名"
+
+# 仅 Canvas 模式需要
+export CANVAS_API_TOKEN="你的 Canvas token"
 ```
 
-> Canvas 令牌获取：登录 `https://oc.sjtu.edu.cn` → 账户 → 设置 → 已批准集成 → 新建访问令牌。
+`setting/api_env.sh` 已被 `.gitignore` 忽略，不会上传 GitHub。
 
-### 3. 独立批改（非 Canvas）
+### 3. 创建运行配置
 
-如果你已经手动下载了学生作业 ZIP 或文件夹，可以直接运行核心批改脚本：
+复制模板：
 
-```powershell
-# 先做一次文件检查（不调用 AI）
-python grade_homework_skill_patch.py `
-  --answer "D:\答案\第9次作业答案.pdf" `
-  --submissions "D:\学生作业\hw9_submissions.zip" `
-  --output-dir ".\grading_output_test" `
-  --dry-run-discover
-
-# 正式批改
-python grade_homework_skill_patch.py `
-  --answer "D:\答案\第9次作业答案.pdf" `
-  --submissions "D:\学生作业\hw9_submissions.zip" `
-  --output-dir ".\grading_output_hw9" `
-  --regular-points 10 `
-  --bonus-points 2 `
-  --backend chat-vision `
-  --model qwen `
-  --grading-mode lenient
+```bash
+cp setting/run_config.template.json setting/run_config.json
 ```
 
-### 4. Canvas 集成批改
+然后编辑 `setting/run_config.json`。最常改的是：
 
-#### 4.1 创建配置文件
+| 字段 | 说明 |
+|---|---|
+| `mode` | `local` 本地文件批改；`canvas` 从 Canvas 下载/上传 |
+| `answer` | 参考答案 PDF 路径 |
+| `submissions` | 学生作业 ZIP/文件夹，仅 `local` 模式需要 |
+| `roster` | 花名册，可选 |
+| `output_dir` | 输出目录，默认建议 `output` |
+| `canvas_course_id` / `canvas_assignment_id` | Canvas 模式需要 |
+| `max_workers` / `requests_per_minute` | 并发和请求次数限速 |
+| `render_dpi` / `max_render_pages` | PDF 转图片质量和页数上限 |
 
-创建 `grading_config.json`：
+模板里的 `_template_note`、`_quick_start`、`_help_by_section` 都只是说明，程序会忽略。真正生效的是后面的顶层配置字段。
 
-```json
-{
-  "canvas_course_id": "87616",
-  "canvas_assignment_id": "409604",
-  "answer": "D:\\答案\\第9次作业答案.pdf",
-  "regular_points": 10,
-  "bonus_points": 2,
-  "backend": "chat-vision",
-  "model": "qwen",
-  "grading_mode": "lenient",
-  "blank_review_scores": true,
-  "score_decimals": 1,
-  "review_threshold": 0.65,
-  "canvas_student_slice": "45:90",
-  "output_dir": ".\\grading_output_hw9"
-}
+旧的 `grading_config.json` 不再是推荐入口；现在统一使用 `setting/run_config.json`。如果你有旧配置，可以把字段复制到新的 `setting/run_config.json`。
+
+### 4. 运行
+
+先检查文件识别，不调用 AI：
+
+```bash
+./run.sh --dry-run-discover
 ```
 
-#### 4.2 分步执行（推荐首次使用）
+正式运行：
 
-```powershell
-# 第 1 步：仅下载，确认连接正常
-python canvas_integration.py --config grading_config.json --canvas-fetch-only
-
-# 第 2 步：批改但不上传，先检查结果
-python canvas_integration.py --config grading_config.json --canvas-skip-upload
-
-# 第 3 步：预览上传内容（不会实际写入 Canvas）
-python canvas_integration.py --config grading_config.json --canvas-dry-run-upload
-
-# 第 4 步：正式上传成绩和评语
-python canvas_integration.py --config grading_config.json
+```bash
+./run.sh
 ```
 
-#### 4.3 导出 Canvas 成绩表
+使用另一个配置文件：
 
-独立脚本 `fetch_grades.py` 可以直接从 Canvas 抓取指定作业的成绩，生成简洁的三列 Excel（学号、姓名、成绩），适合存档或导入成绩系统。
+```bash
+./run.sh setting/hw4_config.json
+```
 
-```powershell
-# 抓取所有选课学生（未提交或未评分的成绩列留空）
-python fetch_grades.py --config grading_config.json --mode all
+`run.sh` 顶部只有启动相关设置：默认 config 路径、默认 env 路径和 Python 命令。数据文件、输出路径和批改参数都在 `setting/run_config.json` 里指定。
 
-# 仅抓取已有成绩的学生
-python fetch_grades.py --config grading_config.json --mode graded
+### Canvas 常用分步命令
 
-# 仅抓取已提交作业的学生
-python fetch_grades.py --config grading_config.json --mode submitted
+`setting/run_config.json` 中设置 `"mode": "canvas"` 后，可以这样分步跑：
+
+```bash
+./run.sh --canvas-fetch-only
+./run.sh --canvas-skip-upload
+./run.sh --canvas-dry-run-upload
+./run.sh
+```
+
+### 导出 Canvas 成绩表
+
+独立脚本 `src/fetch_grades.py` 可以直接从 Canvas 抓取指定作业的成绩，生成简洁的三列 Excel（学号、姓名、成绩），适合存档或导入成绩系统。
+
+```bash
+python src/fetch_grades.py --config setting/run_config.json --mode all
+python src/fetch_grades.py --config setting/run_config.json --mode graded
+python src/fetch_grades.py --config setting/run_config.json --mode submitted
 ```
 
 **三种抓取模式：**
@@ -237,7 +231,7 @@ python fetch_grades.py --config grading_config.json --mode submitted
 
 ## 配置文件详解
 
-`grading_config.json` 支持以下字段（均可选，未提供的用命令行参数或环境变量替代）：
+`setting/run_config.json` 支持以下字段（均可选，未提供的用命令行参数或环境变量替代）：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -254,6 +248,10 @@ python fetch_grades.py --config grading_config.json --mode submitted
 | `blank_review_scores` | bool | 需复核的学生成绩留空（默认 true） |
 | `canvas_student_slice` | string | Python 切片，如 `"0:45"` 批改前 45 人 |
 | `max_pdfs` | int | 最多批改人数限制 |
+| `max_workers` | int | 并发批改 worker 数，默认 1 |
+| `requests_per_minute` | float | AI 请求总速率上限，0 表示不限制 |
+| `api_max_retries` | int | OpenAI SDK 自动重试次数，默认 0，避免单份作业失败时长时间卡住 |
+| `refresh_answer_key` | bool | 忽略已有 `answer_key.json` 并重新抽取参考答案 |
 | `output_dir` | string | 输出目录路径 |
 | `roster` | string/null | 本地花名册 xlsx 路径（用于补充 Canvas 缺失的学号） |
 
@@ -273,11 +271,20 @@ python fetch_grades.py --config grading_config.json --mode submitted
 | `--grading-mode` | `standard` / `lenient` / `strict` |
 | `--backend` | `chat-vision`（推荐）/ `responses` |
 | `--model` | 模型名称 |
+| `--api-timeout` | AI API 单次请求超时秒数（默认 120） |
+| `--api-max-retries` | OpenAI SDK 自动重试次数，默认 0 |
+| `--render-timeout` | PDF 渲染单文件超时秒数（默认 120） |
 | `--review-threshold` | 复核置信度阈值（默认 0.75） |
 | `--score-decimals` | 上传成绩小数位数（默认 2） |
 | `--blank-review-scores` | 需复核的学生成绩留空 |
-| `--max-pdfs` | 限制批改人数 |
+| `--max-pdfs` | 限制本轮新增批改人数；续跑时已完成结果不计入 |
+| `--max-workers` | 并发批改 worker 数，默认 1 |
+| `--requests-per-minute` | AI 请求总速率上限，0 表示不限制 |
+| `--refresh-answer-key` | 忽略已有 `answer_key.json` 并重新抽取参考答案 |
+| `--output-profile` | 输出模式：`compact`（默认）/ `full` |
+| `--no-resume` | 不复用已有结果，强制重新批改全部提交 |
 | `--dry-run-discover` | 仅检查文件识别，不调用 AI |
+| `--verbose` | 显示逐文件渲染/API 调试日志 |
 | `--no-ai-analysis` | 跳过 AI 班级分析 |
 | `--no-trust-env` | 绕过系统代理（校园网常见问题） |
 
@@ -315,7 +322,7 @@ python fetch_grades.py --config grading_config.json --mode submitted
 | `--canvas-course-id` | `CANVAS_COURSE_ID` | 课程 ID |
 | `--canvas-assignment-id` | `CANVAS_ASSIGNMENT_ID` | 作业 ID |
 | `--mode` | — | 抓取模式：`all`（默认）/ `graded` / `submitted` |
-| `--output-dir` | — | 输出目录（默认当前目录） |
+| `--output-dir` | — | 输出目录（默认 `output`） |
 
 ---
 
@@ -410,18 +417,29 @@ Canvas 采用漏桶算法限流。脚本内置了：
 
 ## 输出文件
 
-批改完成后，输出目录包含以下文件：
+批改完成后，默认 `compact` 输出包含以下文件：
 
 | 文件 | 内容 |
 |---|---|
 | `总成绩_三列表.xlsx` | 学号、姓名、成绩——适合直接上传成绩系统 |
 | `批改明细.xlsx` | 每题得分/满分、置信度、逐题反馈、复核标记 |
 | `人工复核.xlsx` | 需要人工检查的学生名单和原因 |
+| `answer_key.json` | AI 抽取的参考答案结构化数据 |
+| `answer_key_meta.json` | 参考答案 PDF 指纹和配分参数，用于判断缓存是否可复用 |
+| `AI请求速率分析.md` | AI 请求次数、平均速率和限流等待统计 |
+| `作业耗时诊断.md` | 每份作业的总耗时、渲染耗时、AI 请求耗时和异常原因 |
+| `results.json` | 完整的结构化批改结果 |
+
+运行中会实时写入 `partial_results.json` 作为中断备份；`compact` 模式正常完成后会删除它，下一次续跑使用 `results.json`。
+
+加 `--output-profile full` 时额外生成：
+
+| 文件 | 内容 |
+|---|---|
 | `批改详情.md` | 面向助教的详细批改报告 |
 | `班级分析.md` | 班级整体表现与常见问题分析 |
-| `answer_key.json` | AI 抽取的参考答案结构化数据 |
-| `results.json` | 完整的结构化批改结果 |
-| `partial_results.json` | 批改进度备份（每批完一个学生实时写入） |
+| `AI请求速率分析.json` | AI 请求速率分析的结构化版本 |
+| `作业耗时诊断.json` | 作业耗时诊断的结构化版本 |
 
 ---
 
@@ -435,10 +453,13 @@ Canvas 采用漏桶算法限流。脚本内置了：
 *.pdf          # 学生作业、参考答案
 *.zip          # 作业压缩包
 *.xlsx         # 成绩表（含学号、姓名、分数）
-grading_output*/   # 所有批改输出
+output/        # 默认批改输出
+grading_output*/   # 旧版批改输出
 __pycache__/
 *.pyc
 .env           # 环境变量
+setting/api_env.sh    # 私密 API/Canvas 环境变量
+setting/run_config.json   # 个人运行配置
 *.key          # 密钥文件
 .DS_Store
 Thumbs.db
@@ -448,7 +469,7 @@ Thumbs.db
 
 - **绝不**将 API key 硬编码在脚本中或写入 JSON 配置文件
 - 使用环境变量传递密钥（`$env:AI_GRADER_API_KEY`、`$env:CANVAS_API_TOKEN`）
-- `.gitignore` 已排除 `.env` 文件
+- `.gitignore` 已排除 `.env`、`setting/api_env.sh` 和个人运行配置
 
 ### Canvas 上传安全
 
@@ -473,7 +494,7 @@ Thumbs.db
 ### 首次使用（Canvas 集成）
 
 1. 获取 Canvas API Token
-2. 创建 `grading_config.json`，填写课程和作业 ID
+2. 创建 `setting/run_config.json`，填写课程和作业 ID，并设置 `"mode": "canvas"`
 3. `--canvas-fetch-only` → 确认能下载
 4. `--canvas-skip-upload` → 批改并检查结果
 5. `--canvas-dry-run-upload` → 预览上传内容
