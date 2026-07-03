@@ -198,13 +198,38 @@ cp setting/run_config.template.json setting/run_config.json
 
 ### Canvas 常用分步命令
 
-`setting/run_config.json` 中设置 `"mode": "canvas"` 后，可以这样分步跑：
+Canvas 模式可以使用独立模板和脚本：
 
 ```bash
-./run.sh --canvas-fetch-only
-./run.sh --canvas-skip-upload
-./run.sh --canvas-dry-run-upload
-./run.sh
+cp setting/canvas_config.template.json setting/canvas_config.json
+```
+
+编辑 `setting/canvas_config.json`，填写：
+
+- `answer`
+- `roster`
+- `output_dir`
+- `canvas_course_id`
+- `canvas_assignment_id`
+- 并发和限速参数，例如 `max_workers`、`requests_per_minute`
+
+然后按步骤运行：
+
+```bash
+./run_canvas.sh fetch      # 只从 Canvas 下载提交
+./run_canvas.sh grade      # 批改并生成输出，但不上传
+./run_canvas.sh preview    # 预览上传内容
+./run_canvas.sh upload     # 正式上传成绩和评语
+```
+
+Canvas 模式默认使用 `grading_mode=lenient`，并叠加 TA 宽松规则：答案错 3 题以内不扣分，6 题以内总扣约 1 分，更多错误总扣约 1.5 分，步骤非常离谱时约扣 2 分，除非做得非常差，否则常规题总分尽量不低于 80%。
+
+Canvas 二次复核只处理首次批改中 `needs_review=true` 的题目；现在按“每份提交一次请求”批量复核该提交内所有待复核题，并复用 `max_workers` 并行和 `requests_per_minute` 限速。
+
+也可以指定另一个 Canvas 配置：
+
+```bash
+./run_canvas.sh setting/my_canvas_config.json grade
 ```
 
 ### 导出 Canvas 成绩表
