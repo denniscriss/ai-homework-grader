@@ -90,6 +90,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-workers", type=int, default=1, help="Maximum number of student PDFs to grade concurrently. Default 1 keeps serial behavior.")
     parser.add_argument("--requests-per-minute", type=float, default=0.0, help="Global AI request limit per minute for grading/review/analysis. 0 means unlimited.")
     parser.add_argument("--output-profile", choices=["compact", "full"], default=os.getenv("AI_GRADER_OUTPUT_PROFILE", "compact"), help="compact writes essential outputs; full writes all debug/report files.")
+    parser.add_argument("--generate-feedback", action="store_true", dest="generate_feedback", default=None, help="Generate per-question and overall feedback text. Enabled by default.")
+    parser.add_argument("--no-generate-feedback", action="store_false", dest="generate_feedback", default=None, help="Do not generate or write student-facing feedback text.")
     parser.add_argument("--resume", action="store_true", dest="resume", default=True, help="Reuse existing successful results from results.json/partial_results.json. Enabled by default.")
     parser.add_argument("--no-resume", action="store_false", dest="resume", help="Ignore existing results and grade every submission again.")
     parser.add_argument("--dry-run-discover", action="store_true", help="Only discover inputs; do not call AI.")
@@ -128,6 +130,8 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("--api-max-retries must be >= 0.")
     if args.render_timeout <= 0:
         raise SystemExit("--render-timeout must be > 0.")
+    if args.generate_feedback is None:
+        args.generate_feedback = True
     return args
 
 
@@ -898,6 +902,7 @@ def grade_student_pdf(
     bonus_points: float,
     grading_mode: str,
     extra_scoring_rules: str = "",
+    generate_feedback: bool = True,
 ) -> dict[str, Any]:
     answer_key_text = json.dumps(answer_key, ensure_ascii=False, indent=2)
     prompt = f"""
@@ -949,6 +954,15 @@ Grading mode: strict.
     prompt += grading_policies.get(grading_mode, grading_policies["standard"])
     if extra_scoring_rules.strip():
         prompt += "\n" + extra_scoring_rules.strip()
+    if not generate_feedback:
+        prompt += """
+
+Feedback output setting:
+- Do not generate student-facing feedback text.
+- Set every question.feedback to an empty string.
+- Set overall_feedback to an empty string.
+- Still keep review_reason and review_reasons when manual review is needed.
+"""
     result = ai.json_from_pdf(student_pdf, prompt, "grading_result", grading_schema())
     result["filename"] = student_pdf.name
     result["grading_mode"] = grading_mode
@@ -1042,20 +1056,23 @@ def safe_sheet_name(name: str, fallback: str) -> str:
     return cleaned or fallback
 
 
-def cell_xml(value: Any, ref: str) -> str:
+def cell_xml(value: Any, ref: str, style_id: int = 0) -> str:
+    style_attr = f' s="{style_id}"' if style_id else ""
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return f'<c r="{ref}"><v>{value}</v></c>'
+        return f'<c r="{ref}"{style_attr}><v>{value}</v></c>'
     text = escape(cell_text(value))
-    return f'<c r="{ref}" t="inlineStr"><is><t>{text}</t></is></c>'
+    return f'<c r="{ref}"{style_attr} t="inlineStr"><is><t>{text}</t></is></c>'
 
 
-def sheet_xml(rows: list[list[Any]]) -> str:
+def sheet_xml(rows: list[list[Any]], row_styles: dict[int, int] | None = None) -> str:
+    row_styles = row_styles or {}
     row_xml = []
     for row_index, row in enumerate(rows, start=1):
         cells = []
+        style_id = row_styles.get(row_index, 0)
         for col_index, value in enumerate(row, start=1):
             ref = f"{column_letter(col_index)}{row_index}"
-            cells.append(cell_xml(value, ref))
+            cells.append(cell_xml(value, ref, style_id))
         row_xml.append(f'<row r="{row_index}">{"".join(cells)}</row>')
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -1065,12 +1082,38 @@ def sheet_xml(rows: list[list[Any]]) -> str:
     )
 
 
-def write_xlsx(path: Path, sheets: list[tuple[str, list[list[Any]]]]) -> None:
+def xlsx_styles_xml() -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>'
+        '<fills count="5">'
+        '<fill><patternFill patternType="none"/></fill>'
+        '<fill><patternFill patternType="gray125"/></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFFFF2CC"/><bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFF4CCCC"/><bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFFCE4D6"/><bgColor indexed="64"/></patternFill></fill>'
+        '</fills>'
+        '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="4">'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+        '<xf numFmtId="0" fontId="0" fillId="2" borderId="0" xfId="0" applyFill="1"/>'
+        '<xf numFmtId="0" fontId="0" fillId="3" borderId="0" xfId="0" applyFill="1"/>'
+        '<xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0" applyFill="1"/>'
+        '</cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        '</styleSheet>'
+    )
+
+
+def write_xlsx(path: Path, sheets: list[tuple[str, list[list[Any]]] | tuple[str, list[list[Any]], dict[int, int]]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     sheet_entries = []
     rel_entries = []
     overrides = [
-        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>',
     ]
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(
@@ -1080,9 +1123,11 @@ def write_xlsx(path: Path, sheets: list[tuple[str, list[list[Any]]]]) -> None:
             '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
             "</Relationships>",
         )
-        for index, (name, rows) in enumerate(sheets, start=1):
+        for index, sheet in enumerate(sheets, start=1):
+            name, rows = sheet[0], sheet[1]
+            row_styles = sheet[2] if len(sheet) > 2 else {}
             sheet_name = safe_sheet_name(name, f"Sheet{index}")
-            zf.writestr(f"xl/worksheets/sheet{index}.xml", sheet_xml(rows))
+            zf.writestr(f"xl/worksheets/sheet{index}.xml", sheet_xml(rows, row_styles))
             sheet_entries.append(f'<sheet name="{escape(sheet_name)}" sheetId="{index}" r:id="rId{index}"/>')
             rel_entries.append(
                 f'<Relationship Id="rId{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{index}.xml"/>'
@@ -1101,8 +1146,11 @@ def write_xlsx(path: Path, sheets: list[tuple[str, list[list[Any]]]]) -> None:
             "xl/_rels/workbook.xml.rels",
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            f'{"".join(rel_entries)}</Relationships>',
+            f'{"".join(rel_entries)}'
+            '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+            '</Relationships>',
         )
+        zf.writestr("xl/styles.xml", xlsx_styles_xml())
         zf.writestr(
             "[Content_Types].xml",
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -1296,6 +1344,21 @@ def normalize_result(
     result["overall_feedback"] = cell_text(result.get("overall_feedback", ""))
     result["answer_quality"] = cell_text(result.get("answer_quality", ""))
     return result
+
+
+def suppress_feedback_text(result: dict[str, Any]) -> dict[str, Any]:
+    """Remove student-facing feedback while keeping review reasons for TAs."""
+    result["overall_feedback"] = ""
+    for question in result.get("questions", []) or []:
+        if isinstance(question, dict):
+            question["feedback"] = ""
+    return result
+
+
+def suppress_feedback_texts(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for result in results:
+        suppress_feedback_text(result)
+    return results
 
 
 def _result_student_group_key(result: dict[str, Any], roster: list[dict[str, str]]) -> tuple[str, str]:
@@ -1571,8 +1634,39 @@ def load_existing_results(output_dir: Path) -> dict[str, dict[str, Any]]:
     return existing
 
 
+XLSX_STYLE_REVIEW = 1
+XLSX_STYLE_LOW_SCORE = 2
+XLSX_STYLE_LOW_SCORE_REVIEW = 3
+LOW_SCORE_HIGHLIGHT_THRESHOLD = 7.0
+
+
+def as_float(value: Any) -> float | None:
+    try:
+        if value in ("", None):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def grade_row_style(result: dict[str, Any] | None) -> int:
+    if not result:
+        return 0
+    needs_review = bool(result.get("needs_review"))
+    score = as_float(result.get("total_score"))
+    low_score = score is not None and score < LOW_SCORE_HIGHLIGHT_THRESHOLD
+    if low_score and needs_review:
+        return XLSX_STYLE_LOW_SCORE_REVIEW
+    if low_score:
+        return XLSX_STYLE_LOW_SCORE
+    if needs_review:
+        return XLSX_STYLE_REVIEW
+    return 0
+
+
 def write_clean_grades(path: Path, results: list[dict[str, Any]], roster: list[dict[str, str]], blank_review: bool) -> None:
     rows: list[list[Any]] = [["学号", "名字", "成绩"]]
+    row_styles: dict[int, int] = {}
 
     used_files: set[str] = set()
     if roster:
@@ -1591,13 +1685,19 @@ def write_clean_grades(path: Path, results: list[dict[str, Any]], roster: list[d
                 used_files.add(match.get("filename", ""))
                 score = "" if blank_review and match.get("needs_review") else match.get("total_score", "")
             rows.append([row["student_id"], row["name"], score])
+            style_id = grade_row_style(match)
+            if style_id:
+                row_styles[len(rows)] = style_id
 
     for result in results:
         if result.get("filename", "") in used_files:
             continue
         score = "" if blank_review and result.get("needs_review") else result.get("total_score", "")
         rows.append([result.get("student_id", ""), result.get("name", ""), score])
-    write_xlsx(path, [("grades", rows)])
+        style_id = grade_row_style(result)
+        if style_id:
+            row_styles[len(rows)] = style_id
+    write_xlsx(path, [("grades", rows, row_styles)])
 
 
 def write_details_xlsx(path: Path, results: list[dict[str, Any]]) -> None:
@@ -1618,6 +1718,7 @@ def write_details_xlsx(path: Path, results: list[dict[str, Any]]) -> None:
             "总体反馈",
         ]
     ]
+    summary_styles: dict[int, int] = {}
     for result in results:
         summary.append(
             [
@@ -1636,6 +1737,9 @@ def write_details_xlsx(path: Path, results: list[dict[str, Any]]) -> None:
                 redact_sensitive_text(result.get("overall_feedback", "")),
             ]
         )
+        style_id = grade_row_style(result)
+        if style_id:
+            summary_styles[len(summary)] = style_id
 
     question_sheet: list[list[Any]] = [
         [
@@ -1655,6 +1759,7 @@ def write_details_xlsx(path: Path, results: list[dict[str, Any]]) -> None:
             "来源文件",
         ]
     ]
+    question_styles: dict[int, int] = {}
     for result in results:
         for question in result.get("questions", []):
             question_sheet.append(
@@ -1675,11 +1780,14 @@ def write_details_xlsx(path: Path, results: list[dict[str, Any]]) -> None:
                     "; ".join(question.get("source_files", []) or [question.get("source_file", "")]),
                 ]
             )
-    write_xlsx(path, [("Summary", summary), ("QuestionDetails", question_sheet)])
+            if question.get("needs_review"):
+                question_styles[len(question_sheet)] = XLSX_STYLE_REVIEW
+    write_xlsx(path, [("Summary", summary, summary_styles), ("QuestionDetails", question_sheet, question_styles)])
 
 
 def write_review_xlsx(path: Path, results: list[dict[str, Any]]) -> None:
     rows: list[list[Any]] = [["学号", "名字", "文件名", "总分", "复核原因"]]
+    row_styles: dict[int, int] = {}
     for result in results:
         if result.get("needs_review"):
             rows.append(
@@ -1691,7 +1799,10 @@ def write_review_xlsx(path: Path, results: list[dict[str, Any]]) -> None:
                     redact_sensitive_text("; ".join(result.get("review_reasons", []))),
                 ]
             )
-    write_xlsx(path, [("ReviewNeeded", rows)])
+            style_id = grade_row_style(result)
+            if style_id:
+                row_styles[len(rows)] = style_id
+    write_xlsx(path, [("ReviewNeeded", rows, row_styles)])
 
 
 def write_details_md(path: Path, answer_key: dict[str, Any], results: list[dict[str, Any]]) -> None:
@@ -1984,6 +2095,7 @@ def run_grading_pipeline(
     rate_limiter: ApiRateLimiter | None = None,
     existing_results: dict[str, dict[str, Any]] | None = None,
     max_new_pdfs: int | None = None,
+    generate_feedback: bool = True,
 ) -> list[dict[str, Any]]:
     """Grade a list of student PDFs and return normalized results.
 
@@ -1997,6 +2109,8 @@ def run_grading_pipeline(
     for index, pdf in enumerate(student_pdfs):
         reusable = existing_results.get(pdf.name)
         if reusable:
+            if not generate_feedback:
+                reusable = suppress_feedback_text(reusable)
             results_by_index[index] = reusable
         else:
             pending.append((index, pdf))
@@ -2038,10 +2152,21 @@ def run_grading_pipeline(
         try:
             if rate_limiter:
                 rate_limiter.wait("grading")
-            raw_result = grade_student_pdf(ai, pdf, answer_key, regular_points, bonus_points, grading_mode, extra_scoring_rules)
+            raw_result = grade_student_pdf(
+                ai,
+                pdf,
+                answer_key,
+                regular_points,
+                bonus_points,
+                grading_mode,
+                extra_scoring_rules,
+                generate_feedback=generate_feedback,
+            )
             result = normalize_result(raw_result, answer_key, roster, review_threshold, score_decimals, review_zero_scores)
         except Exception as exc:
             result = normalize_result(error_result(pdf, redact_sensitive_text(exc), answer_key), answer_key, roster, review_threshold, score_decimals, review_zero_scores)
+        if not generate_feedback:
+            result = suppress_feedback_text(result)
         diagnostics = ai.get_diagnostics() if hasattr(ai, "get_diagnostics") else {}
         if result.get("answer_quality") == "unreadable" and not diagnostics.get("error"):
             diagnostics["error"] = redact_sensitive_text("; ".join(result.get("review_reasons", [])))
@@ -2107,7 +2232,10 @@ def run_grading_pipeline(
     ]
     if missing:
         raise RuntimeError(f"Internal error: missing grading results for: {', '.join(missing)}")
-    return [result for result in results_by_index if result is not None]
+    results = [result for result in results_by_index if result is not None]
+    if not generate_feedback:
+        suppress_feedback_texts(results)
+    return results
 
 
 def main() -> int:
@@ -2174,8 +2302,12 @@ def main() -> int:
             rate_limiter=rate_limiter,
             existing_results=existing_results,
             max_new_pdfs=args.max_pdfs,
+            generate_feedback=args.generate_feedback,
         )
         results = merge_results_by_student(file_results, answer_key, roster, args.score_decimals)
+        if not args.generate_feedback:
+            suppress_feedback_texts(file_results)
+            suppress_feedback_texts(results)
 
         if results:
             results[0]["_score_decimals"] = args.score_decimals

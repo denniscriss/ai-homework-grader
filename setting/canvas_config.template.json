@@ -2,7 +2,8 @@
   "_template_note": [
     "Canvas mode reference config. Copy this file to setting/canvas_config.json before use.",
     "Do not put API keys or Canvas tokens here. Put private values in setting/api_env.sh.",
-    "Use ./run_canvas.sh fetch, ./run_canvas.sh grade, ./run_canvas.sh preview, then ./run_canvas.sh upload."
+    "Review-first workflow: ./run_canvas.sh grade, inspect/edit output results, ./run_canvas.sh preview, then ./run_canvas.sh upload.",
+    "Fully automatic publishing is still available as ./run_canvas.sh auto-upload."
   ],
   "_required_fields": {
     "answer": "Reference-answer PDF path.",
@@ -29,6 +30,7 @@
   "canvas_ungraded_only": false,
   "canvas_student_slice": null,
   "canvas_overwrite_grades": false,
+  "canvas_upload_comments": true,
 
   "backend": "chat-vision",
   "grading_mode": "lenient",
@@ -39,6 +41,7 @@
   "review_threshold": 0.75,
   "score_decimals": 2,
   "blank_review_scores": false,
+  "generate_feedback": true,
 
   "max_workers": 4,
   "requests_per_minute": 10,

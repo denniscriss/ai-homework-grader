@@ -58,6 +58,7 @@ from grade_homework_skill_patch import (
     read_roster,
     run_grading_pipeline,
     sanitize_for_output,
+    suppress_feedback_texts,
     write_class_analysis_md,
     clean_compact_output_files,
     write_clean_grades,
@@ -1256,6 +1257,8 @@ def integrated_main(args: argparse.Namespace) -> int:
             print(f"Loaded {len(results)} existing results from {results_path}")
             if results and "_score_decimals" not in results[0]:
                 results[0]["_score_decimals"] = args.score_decimals
+            if not args.generate_feedback:
+                suppress_feedback_texts(results)
         else:
             # --- AI grading setup ---
             ai_args = argparse.Namespace(
@@ -1326,6 +1329,7 @@ def integrated_main(args: argparse.Namespace) -> int:
                 rate_limiter=rate_limiter,
                 existing_results=existing_results,
                 max_new_pdfs=args.max_pdfs,
+                generate_feedback=args.generate_feedback,
             )
 
             # --- Second-pass AI review for flagged questions ---
@@ -1348,6 +1352,9 @@ def integrated_main(args: argparse.Namespace) -> int:
                     result["canvas_user_id"] = canvas_uid
 
             results = merge_results_by_student(file_results, answer_key, grading_roster, args.score_decimals)
+            if not args.generate_feedback:
+                suppress_feedback_texts(file_results)
+                suppress_feedback_texts(results)
 
             # --- Statistical outlier check ---
             if len(results) >= 3:
@@ -1401,6 +1408,8 @@ def integrated_main(args: argparse.Namespace) -> int:
         print("=" * 60)
         if args.canvas_dry_run_upload:
             print("DRY RUN: previewing grades that would be uploaded...\n")
+        if not args.canvas_upload_comments or not args.generate_feedback:
+            print("Canvas comments disabled; uploading grades only.")
 
         upload_count = 0
         skip_count = 0
@@ -1424,11 +1433,12 @@ def integrated_main(args: argparse.Namespace) -> int:
                 skip_count += 1
                 continue
 
-            comment = format_feedback_comment(result, answer_key)
+            comment = format_feedback_comment(result, answer_key) if args.canvas_upload_comments and args.generate_feedback else ""
 
             if args.canvas_dry_run_upload:
                 print(f"  [DRY RUN] user={canvas_uid} | {result.get('name', '')} "
-                      f"({result.get('student_id', '')}) | score={score}")
+                      f"({result.get('student_id', '')}) | score={score} | "
+                      f"comment={'yes' if comment else 'no'}")
                 upload_count += 1
                 continue
 
@@ -1533,6 +1543,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                             help="Grade and generate reports, but skip Canvas upload.")
     flow_group.add_argument("--canvas-overwrite-grades", action="store_true",
                             help="Overwrite grades for students who were already graded in Canvas.")
+    flow_group.add_argument("--canvas-upload-comments", action="store_true", dest="canvas_upload_comments",
+                            default=None, help="Upload Canvas text comments with grades. Enabled by default.")
+    flow_group.add_argument("--no-canvas-upload-comments", action="store_false", dest="canvas_upload_comments",
+                            default=None, help="Upload grades only, without Canvas text comments.")
     flow_group.add_argument("--canvas-ungraded-only", action="store_true",
                             help="Only process submissions that have not been graded yet. "
                                  "Skips already-graded students before downloading and grading.")
@@ -1602,6 +1616,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     out_group.add_argument("--output-profile", choices=["compact", "full"],
                            default=os.getenv("AI_GRADER_OUTPUT_PROFILE", "compact"),
                            help="compact writes essential outputs; full writes all debug/report files.")
+    out_group.add_argument("--generate-feedback", action="store_true", dest="generate_feedback",
+                           default=None, help="Generate per-question and overall feedback text. Enabled by default.")
+    out_group.add_argument("--no-generate-feedback", action="store_false", dest="generate_feedback",
+                           default=None, help="Do not generate or write student-facing feedback text.")
     out_group.add_argument("--resume", action="store_true", dest="resume", default=True,
                            help="Reuse existing successful results from results.json/partial_results.json. Enabled by default.")
     out_group.add_argument("--no-resume", action="store_false", dest="resume",
@@ -1646,6 +1664,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise SystemExit("Missing --canvas-course-id or CANVAS_COURSE_ID env var.")
     if not args.canvas_assignment_id:
         raise SystemExit("Missing --canvas-assignment-id or CANVAS_ASSIGNMENT_ID env var.")
+    if args.canvas_upload_comments is None:
+        args.canvas_upload_comments = True
+    if args.generate_feedback is None:
+        args.generate_feedback = True
     if not args.canvas_upload_only and not args.canvas_export_grades and not args.answer and not args.answer_key_json:
         raise SystemExit("Provide --answer or --answer-key-json for the reference answer PDF.")
     if args.max_workers < 1:

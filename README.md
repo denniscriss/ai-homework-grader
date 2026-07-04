@@ -218,9 +218,34 @@ cp setting/canvas_config.template.json setting/canvas_config.json
 ```bash
 ./run_canvas.sh fetch      # 只从 Canvas 下载提交
 ./run_canvas.sh grade      # 批改并生成输出，但不上传
-./run_canvas.sh preview    # 预览上传内容
-./run_canvas.sh upload     # 正式上传成绩和评语
+./run_canvas.sh excel      # 用已有 results.json 重新生成 Excel/Markdown，不重新批改
+./run_canvas.sh preview    # 只预览已有 results.json 将上传什么，不重新批改
+./run_canvas.sh upload     # 只上传已有 results.json，不重新批改
 ```
+
+如果你确定不需要本地复核，也可以一条命令完成抓取、批改、复核和上传：
+
+```bash
+./run_canvas.sh auto-upload
+```
+
+推荐真实发布成绩时使用 `grade -> preview -> upload`：先检查 `output_dir` 里的 Excel、`人工复核.xlsx` 和 `results.json`，必要时本地修改后再上传。手动修改 `results.json` 后，可以运行 `./run_canvas.sh excel` 刷新 Excel 高亮和汇总表。这样不会因为重新运行批改覆盖你已经人工确认过的结果。
+
+Excel 高亮规则：低于 7 分的行会标红，`needs_review=true` 的行会标黄，同时低分且需复核会标橙。高分也可能被标黄，因为它只表示需要人工确认，不代表扣分。
+
+如果只想上传成绩、不想给 Canvas 留评语，把配置里的 `canvas_upload_comments` 设为 `false`：
+
+```json
+"canvas_upload_comments": false
+```
+
+如果连本地结果里的总体反馈/题目反馈也不想生成，把配置里的 `generate_feedback` 设为 `false`：
+
+```json
+"generate_feedback": false
+```
+
+`generate_feedback=false` 会让 AI 尽量不生成 `overall_feedback` 和每题 `feedback`，并在写入 `results.json`、Excel 和 Canvas 上传前再次清空这些学生评语字段。`review_reason` 和 `review_reasons` 会保留，因为它们用于助教人工复核。
 
 Canvas 模式默认使用 `grading_mode=lenient`，并叠加 TA 宽松规则：答案错 3 题以内不扣分，6 题以内总扣约 1 分，更多错误总扣约 1.5 分，步骤非常离谱时约扣 2 分，除非做得非常差，否则常规题总分尽量不低于 80%。
 

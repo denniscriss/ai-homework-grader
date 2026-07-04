@@ -43,9 +43,25 @@ case "$COMMAND" in
       echo "先复制模板：cp setting/canvas_config.template.json setting/canvas_config.json"
       exit 1
     fi
-    ./run.sh "$CONFIG_PATH" --canvas-dry-run-upload "$@"
+    ./run.sh "$CONFIG_PATH" --canvas-upload-only --canvas-dry-run-upload "$@"
     ;;
   upload)
+    if [ ! -f "$CONFIG_PATH" ]; then
+      echo "错误：找不到 Canvas 配置文件 $CONFIG_PATH"
+      echo "先复制模板：cp setting/canvas_config.template.json setting/canvas_config.json"
+      exit 1
+    fi
+    ./run.sh "$CONFIG_PATH" --canvas-upload-only "$@"
+    ;;
+  excel|regenerate)
+    if [ ! -f "$CONFIG_PATH" ]; then
+      echo "错误：找不到 Canvas 配置文件 $CONFIG_PATH"
+      echo "先复制模板：cp setting/canvas_config.template.json setting/canvas_config.json"
+      exit 1
+    fi
+    ./run.sh "$CONFIG_PATH" --regenerate-excel "$@"
+    ;;
+  auto-upload)
     if [ ! -f "$CONFIG_PATH" ]; then
       echo "错误：找不到 Canvas 配置文件 $CONFIG_PATH"
       echo "先复制模板：cp setting/canvas_config.template.json setting/canvas_config.json"
@@ -59,8 +75,10 @@ Canvas runner usage:
 
   ./run_canvas.sh fetch      # only download submissions from Canvas
   ./run_canvas.sh grade      # grade and write outputs, but do not upload
-  ./run_canvas.sh preview    # preview Canvas upload without writing grades
-  ./run_canvas.sh upload     # run full Canvas flow and upload grades
+  ./run_canvas.sh excel      # regenerate Excel/Markdown from existing output/results.json
+  ./run_canvas.sh preview    # preview upload from existing output/results.json
+  ./run_canvas.sh upload     # upload existing output/results.json only
+  ./run_canvas.sh auto-upload # fetch, grade, review, and upload in one run
 
 Use another config:
 
@@ -77,7 +95,7 @@ EOF
     ;;
   *)
     echo "错误：未知命令 $COMMAND"
-    echo "可用命令：fetch, grade, preview, upload"
+    echo "可用命令：fetch, grade, excel, preview, upload, auto-upload"
     exit 1
     ;;
 esac
