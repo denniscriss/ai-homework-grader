@@ -32,6 +32,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -45,16 +46,19 @@ from grade_homework_skill_patch import (
     apply_point_allocation,
     error_result,
     filename_identity,
+    format_duration,
     grading_schema,
     load_or_extract_answer_key,
     load_existing_results,
     make_ai_backend,
+    merge_results_by_student,
     norm_id,
     norm_text,
     normalize_result,
     read_roster,
     run_grading_pipeline,
     sanitize_for_output,
+    suppress_feedback_texts,
     write_class_analysis_md,
     clean_compact_output_files,
     write_clean_grades,
@@ -474,7 +478,7 @@ def format_feedback_comment(
 # ---------------------------------------------------------------------------
 
 def build_extra_scoring_rules() -> str:
-    """Extra scoring rules for TA grading: lenient on regular, strict on bonus."""
+    """Extra scoring rules for TA grading: assignment-level lenient scoring."""
     return """
 极其重要的评分准则（覆盖所有题目，无论评分模式，必须严格遵守）:
 
@@ -483,25 +487,14 @@ def build_extra_scoring_rules() -> str:
 - 不同的推导方法、不同的求解路径，只要物理思路正确、结论一致，必须给满分。不要因为"标准答案用了方法A、学生用了方法B"而扣分。
 - 学生写得"繁琐"不等于"错误"。步骤多、表达式长、绕了弯路但最终正确，都是满分。
 
-【常规题（type=regular）: 极度宽松，重点看"学生是否认真做了"】
-
-【扣分上限原则 — 最重要，先读】
-- 任何题目，只要学生写了过程（无论正误），扣分不得超过该题满分的一半。
-  即：这道题的最低得分 = 满分 × 0.5。
-- 例外：完全空白、或只写了一个孤立的错误数字且无任何推导步骤 → 才给 0 分。
-
-【写了过程 + 写了答案 → 答案正确满分，答案错误至少扣 0.1 分】
-- 只要学生的作答包含推导步骤和最终答案（两个都有），需要判断答案是否正确。
-- 答案数学上等价于标准答案 → 满分，不扣分。
-- 答案不等价（即答案错误）→ 必须至少扣 0.1 分，无论思路是否正确。扣分范围 0.1~0.2。
-- 判断标准：学生有没有写过程？有没有写答案？两个都有且答案正确 → 满分；两个都有但答案错误 → 至少扣 0.1。
-- 例子：学生写满了一张纸的推导，最后答案算错了 → 扣 0.1，给 4.9/5.0。
-
-【正负号错误 — 宽松但必须扣分】
-- 正负号写错（如 + 写成 -、sin 写成 -sin、相位多/少 π 等）属于答案错误，必须至少扣 0.1 分。
-  * 如果学生的步骤完整、推导清晰 → 扣 0.1 分。符号极可能是笔误，但答案错误必须扣分。
-  * 如果步骤跳跃、推导不完整、疑似乱猜 → 扣 0.1 分。
-- 判断标准：无论步骤多少，正负号错误一律扣 0.1。
+【常规题（type=regular）: 整份作业宽松扣分，按错题数量控制总分】
+- 不要按每道题机械扣很多分。先通读整份作业，估计常规题中"最终答案不等价/明显错误"的题数，再把总扣分分摊到相关题目上。
+- 答案错误 3 题以内：常规题总分不扣分。相关题目仍可在 review_reason 里说明答案有误，但 score 应尽量给满。
+- 答案错误 4 到 6 题：常规题总分合计扣 1 分左右。把这 1 分分摊到错误题上，不要每题扣 1 分。
+- 答案错误超过 6 题：常规题总分合计扣 1.5 分左右。把这 1.5 分分摊到错误题上。
+- 如果某题步骤错得非常离谱、明显乱写、物理概念完全不相关或与题目无关，可以对整份常规题总分最多扣 2 分左右。
+- 除非几乎空白、严重缺页、绝大多数题没有有效过程、或内容明显与题目无关，最终常规题得分应尽量不低于常规题总分的 80%（例如常规题总分 10 分时，尽量不低于 8 分）。
+- 如果学生认真写了过程，即使最终答案有若干处错误，也应该给接近满分。
 
 【其他不扣分的情况】
 - 系数形式不同但等价、相位写法不同、用了不同坐标系、答案未化简、单位漏写（数值正确）、用近似值代替精确值 → 一律不扣分。
@@ -510,12 +503,12 @@ def build_extra_scoring_rules() -> str:
 【常规题评分速查表】
 | 学生情况 | 该给几分 |
 |---|---|
-| 有过程、有答案、结果正确 | 满分 |
-| 有过程、有答案、结果不对 | 满分 - 0.1~0.2（答案错误必须扣至少 0.1） |
-| 有过程、有答案、正负号错了但步骤多 | 满分 - 0.1（正负号错误也是答案错误，必须扣分） |
-| 有过程、有答案、正负号错了步骤少 | 满分 - 0.1 |
-| 有过程、没写最终答案 | 满分 - 0.3 |
-| 只写了一个答案数字，没有过程 | 满分 × 0.5 |
+| 答案错 0~3 题，且有认真过程 | 常规题总分不扣 |
+| 答案错 4~6 题，且有认真过程 | 常规题总分约扣 1 分 |
+| 答案错 6 题以上，且有认真过程 | 常规题总分约扣 1.5 分 |
+| 个别题步骤非常离谱/明显乱写 | 常规题总分最多约扣 2 分 |
+| 多数题有过程但错误较多 | 尽量不低于 80% |
+| 只写答案、没有过程 | 可低于 80%，按可判断正确性给分 |
 | 完全空白 | 0 分 |
 
 【附加题（type=bonus）: 适度严格】
@@ -527,12 +520,11 @@ def build_extra_scoring_rules() -> str:
 - 当你不确定是否等价时，confidence 设为 0.7-0.8，needs_review=true，但分数给偏高的一边。
 
 【强制自检步骤 — 每道题评分前必须执行】
-1. 先看学生有没有写推导过程？有过程 → 跳到第 3 条。
-2. 没过程、只有答案数字 → 给满分的 50%。
-3. 有过程、也有答案 → 看答案是否数学上等价于标准答案？等价 → 满分。
-4. 不等价 → 答案错误，必须至少扣 0.1 分。然后看正负号：正负号错但步骤多 → 扣 0.1；步骤少 → 扣 0.1。
-5. 正负号对但答案其他部分错 → 扣 0.1~0.2（上限！不要多扣）。
-6. 最后自问: 这个学生认真做了吗？认真做的迹象（写了过程、写了答案）→ 给满分或接近满分（但答案错误时至少扣 0.1）。
+1. 先判断每道常规题最终答案是否等价于标准答案，并统计答案错误题数。
+2. 再判断是否存在"步骤非常离谱/明显乱写/与题目无关"。
+3. 根据错题数决定整份常规题总扣分：0~3 题错不扣；4~6 题错扣约 1；超过 6 题错扣约 1.5；非常离谱可扣约 2。
+4. 把总扣分分摊到错误或离谱的题目上，确保所有 regular 题的分数相加符合上面的总扣分尺度。
+5. 最后检查总分：除非做得非常差，常规题总分尽量不低于 80%。
 
 【总体】
 - 评分时反复自问"这个学生懂不懂这道题？"如果答案是"懂"，就给满分或接近满分。
@@ -551,11 +543,12 @@ def review_flagged_questions(
     answer_key: dict[str, Any],
     extra_scoring_rules: str,
     rate_limiter: ApiRateLimiter | None = None,
+    max_workers: int = 1,
 ) -> list[dict[str, Any]]:
-    """Re-evaluate questions flagged as needs_review with a focused second AI pass.
+    """Re-evaluate flagged questions with one AI request per student file.
 
-    Only reviews questions where needs_review=True. Sends the original evidence
-    and first-pass score to the AI for reconsideration.
+    Only reviews questions where needs_review=True. Each result's flagged
+    questions are batched into one prompt to avoid one request per question.
     """
     # Build per-question lookup from answer_key
     key_questions = {str(q.get("id", "")): q for q in answer_key.get("questions", [])}
@@ -564,81 +557,186 @@ def review_flagged_questions(
         prefix, separator, _ = str(reason).partition(":")
         return bool(separator) and prefix.strip() in key_questions
 
-    review_count = 0
-    for result in results:
-        for q in result.get("questions", []):
-            if not q.get("needs_review"):
+    def review_items_for_result(result: dict[str, Any]) -> list[dict[str, Any]]:
+        items = []
+        for question in result.get("questions", []):
+            if not question.get("needs_review"):
                 continue
-
-            qid = str(q.get("id", ""))
-            key_q = key_questions.get(qid)
-            if not key_q:
+            qid = str(question.get("id", ""))
+            key_question = key_questions.get(qid)
+            if not key_question:
                 continue
-
-            max_pts = q.get("max_points", 0)
-            if max_pts <= 0:
+            max_points = float(question.get("max_points", 0) or 0)
+            if max_points <= 0:
                 continue
+            items.append(
+                {
+                    "id": qid,
+                    "type": key_question.get("type", "unknown"),
+                    "max_points": max_points,
+                    "reference_solution": str(key_question.get("reference_solution", "无"))[:500],
+                    "scoring_points": key_question.get("scoring_points", [])[:5],
+                    "first_score": question.get("score", 0),
+                    "first_confidence": question.get("confidence", 0.5),
+                    "first_feedback": str(question.get("feedback", "")).strip()[:300],
+                    "review_reason": str(question.get("review_reason", "")).strip()[:300],
+                    "evidence": str(question.get("evidence", "")).strip()[:800] or "无（题目未在作业中找到）",
+                }
+            )
+        return items
 
-            old_score = q.get("score", 0)
-            evidence = q.get("evidence", "").strip()
-            old_feedback = q.get("feedback", "").strip()
-            review_reason = q.get("review_reason", "").strip()
+    review_jobs = [
+        (index, result, review_items_for_result(result))
+        for index, result in enumerate(results)
+    ]
+    review_jobs = [(index, result, items) for index, result, items in review_jobs if items]
+    if not review_jobs:
+        return results
 
-            print(f"  [Review] {result.get('name', '?')} Q{qid}: "
-                  f"first pass {old_score}/{max_pts} (reason: {review_reason[:60]})")
+    worker_count = max(1, min(int(max_workers or 1), len(review_jobs)))
+    total_questions = sum(len(items) for _, _, items in review_jobs)
+    print(
+        f"Second-pass review: {len(review_jobs)} submission(s), "
+        f"{total_questions} flagged question(s), {worker_count} worker(s)."
+    )
 
-            prompt = f"""你是审查助教。请重新评判下面这道题目的得分。
+    def review_one_result(index: int, result: dict[str, Any], items: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]], str, float]:
+        item_started_at = time.monotonic()
+        prompt = f"""你是审查助教。请一次性复核下面这份学生作业中所有被标记为需要复核的题目。
 
 原评分规则:
 {extra_scoring_rules.strip()}
 
-题目 {qid}（满分 {max_pts} 分，类型 {key_q.get('type', 'unknown')}）:
-参考解答: {key_q.get('reference_solution', '无')[:500]}
-评分要点: {'; '.join(key_q.get('scoring_points', [])[:5])}
+学生: {result.get('student_id', '')} {result.get('name', '')}
+文件: {result.get('filename', '')}
 
-学生作业中可见的证据: {evidence if evidence else '无（题目未在作业中找到）'}
+需要复核的题目列表（JSON）:
+{json.dumps(items, ensure_ascii=False, indent=2)}
 
-第一次评分: {old_score}/{max_pts}
-第一次反馈: {old_feedback}
-复核触发原因: {review_reason}
-
-请重新给出你的评分（0 到 {max_pts} 之间，可以是小数）和新置信度。
-如果第一次评分合理，可以维持原判。
-输出 JSON: {{"score": 数字, "confidence": 数字(0-1), "reasoning": "重新判分理由(中文,100字以内)"}}
+要求:
+- 只复核列表中的题目，不要新增题目。
+- 如果第一次评分合理，可以维持原判。
+- 每题 score 必须在 0 到该题 max_points 之间。
+- 输出必须是一个 JSON 对象，格式为:
+{{
+  "reviews": [
+    {{"id": "题号", "score": 数字, "confidence": 0到1之间的数字, "reasoning": "中文理由，100字以内"}}
+  ]
+}}
 """
+        try:
+            if rate_limiter:
+                rate_limiter.wait("review")
+            text = ai.text(prompt)
+            obj = _extract_json(text)
+            raw_reviews = obj.get("reviews", [])
+            if isinstance(raw_reviews, dict):
+                raw_reviews = [raw_reviews]
+            if not isinstance(raw_reviews, list):
+                raise ValueError("review response missing reviews array")
+            return index, [item for item in raw_reviews if isinstance(item, dict)], "", time.monotonic() - item_started_at
+        except Exception as exc:
+            return index, [], str(exc), time.monotonic() - item_started_at
+
+    items_by_index = {index: items for index, _, items in review_jobs}
+    review_started_at = time.monotonic()
+    review_count = 0
+    request_count = 0
+    completed_requests = 0
+
+    def apply_review_result(index: int, raw_reviews: list[dict[str, Any]]) -> tuple[int, int, int]:
+        result = results[index]
+        question_by_id = {str(question.get("id", "")): question for question in result.get("questions", [])}
+        reviewed = 0
+        adjusted = 0
+        cleared = 0
+        for review in raw_reviews:
+            qid = str(review.get("id", ""))
+            q = question_by_id.get(qid)
+            if not q or not q.get("needs_review"):
+                continue
+            max_pts = float(q.get("max_points", 0) or 0)
+            old_score = q.get("score", 0)
+            old_feedback = str(q.get("feedback", "")).strip()
             try:
-                if rate_limiter:
-                    rate_limiter.wait("review")
-                text = ai.text(prompt)
-                # Parse JSON from response
-                obj = _extract_json(text)
-                new_score = float(obj.get("score", old_score))
-                new_score = max(0.0, min(float(max_pts), new_score))
-                new_confidence = float(obj.get("confidence", q.get("confidence", 0.5)))
-                new_confidence = max(0.0, min(1.0, new_confidence))
-                reasoning = str(obj.get("reasoning", ""))[:120]
+                new_score = float(review.get("score", old_score))
+            except Exception:
+                new_score = float(old_score or 0)
+            new_score = max(0.0, min(max_pts, new_score))
+            try:
+                new_confidence = float(review.get("confidence", q.get("confidence", 0.5)))
+            except Exception:
+                new_confidence = float(q.get("confidence", 0.5) or 0.5)
+            new_confidence = max(0.0, min(1.0, new_confidence))
+            reasoning = str(review.get("reasoning", ""))[:120]
 
-                if abs(new_score - old_score) > 0.01:
-                    q["score"] = round(new_score, 2)
-                    q["confidence"] = round(new_confidence, 2)
-                    q["feedback"] = (old_feedback + " [复审调整: " + reasoning + "]").strip()
-                    print(f"    Adjusted: {old_score} -> {new_score}/{max_pts}")
-                else:
-                    q["confidence"] = round(max(q.get("confidence", 0.5), new_confidence), 2)
-                    print(f"    Confirmed: {old_score}/{max_pts} maintained")
+            if abs(new_score - float(old_score or 0)) > 0.01:
+                q["score"] = round(new_score, 2)
+                q["confidence"] = round(new_confidence, 2)
+                q["feedback"] = (old_feedback + " [复审调整: " + reasoning + "]").strip()
+                adjusted += 1
+            else:
+                q["confidence"] = round(max(q.get("confidence", 0.5), new_confidence), 2)
 
-                # If still needs review, keep the flag; otherwise clear if confidence improved
-                if new_confidence >= 0.75:
-                    q["needs_review"] = False
-                    q["review_reason"] = ""
-                    print(f"    Review flag cleared (confidence {new_confidence:.2f})")
+            if new_confidence >= 0.75:
+                q["needs_review"] = False
+                q["review_reason"] = ""
+                cleared += 1
 
-                review_count += 1
-            except Exception as exc:
-                print(f"    Review failed: {exc} — keeping original score")
+            reviewed += 1
+        return reviewed, adjusted, cleared
+
+    def print_review_progress(
+        completed: int,
+        index: int,
+        reviewed: int,
+        adjusted: int,
+        cleared: int,
+        error: str,
+        item_seconds: float,
+    ) -> None:
+        elapsed = time.monotonic() - review_started_at
+        avg = elapsed / completed if completed else 0.0
+        remaining = max(0, len(review_jobs) - completed)
+        eta = avg * remaining
+        result = results[index]
+        flagged = len(items_by_index.get(index, []))
+        status = "failed" if error else "ok"
+        detail = f" | reviewed {reviewed}/{flagged} q | adjusted {adjusted} | cleared {cleared}"
+        if error:
+            short_error = error.replace("\n", " ")[:80]
+            detail = f" | error {short_error}"
+        print(
+            f"[{completed}/{len(review_jobs)}] review completed {result.get('filename', '')} | "
+            f"status {status}{detail} | last {item_seconds:.1f}s | "
+            f"elapsed {format_duration(elapsed)} | avg {avg:.1f}s/submission | ETA {format_duration(eta)}",
+            flush=True,
+        )
+
+    def handle_completed(completed: tuple[int, list[dict[str, Any]], str, float]) -> None:
+        nonlocal completed_requests, review_count, request_count
+        index, raw_reviews, error, item_seconds = completed
+        reviewed, adjusted, cleared = apply_review_result(index, raw_reviews)
+        completed_requests += 1
+        if not error:
+            request_count += 1
+        review_count += reviewed
+        print_review_progress(completed_requests, index, reviewed, adjusted, cleared, error, item_seconds)
+
+    if worker_count == 1:
+        for index, result, items in review_jobs:
+            handle_completed(review_one_result(index, result, items))
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(review_one_result, index, result, items)
+                for index, result, items in review_jobs
+            ]
+            for future in as_completed(futures):
+                handle_completed(future.result())
 
     if review_count:
-        print(f"Second-pass review: {review_count} questions re-evaluated")
+        print(f"Second-pass review: {review_count} questions re-evaluated in {request_count} request(s)")
 
     # Recompute total scores after adjustments
     for result in results:
@@ -1083,7 +1181,6 @@ def integrated_main(args: argparse.Namespace) -> int:
                     print(f"  [SKIP] {sub['user_name']} (user {sub['canvas_user_id']}): no attachments")
                     continue
 
-                # Use the first PDF attachment (or the only one)
                 pdf_attachments = [
                     a for a in attachments
                     if (a.get("content-type") or "").lower() == "application/pdf"
@@ -1093,7 +1190,6 @@ def integrated_main(args: argparse.Namespace) -> int:
                     # Fall back to first attachment regardless of type
                     pdf_attachments = [attachments[0]]
 
-                attachment = pdf_attachments[0]
                 user_id = sub["canvas_user_id"]
                 user_name = sub.get("user_name", f"user_{user_id}")
                 roster_entry = next((r for r in grading_roster if r.get("canvas_user_id") == user_id), None)
@@ -1104,18 +1200,42 @@ def integrated_main(args: argparse.Namespace) -> int:
                 else:
                     preferred = f"canvas_{user_id}_{safe_name}"
 
-                local_path = canvas.download_attachment(attachment, pdf_dir, preferred)
-                if local_path and local_path.stat().st_size > 0:
-                    student_pdfs.append(local_path)
-                    submission_map[local_path.name] = sub
-                    status = ""
-                    if sub.get("late"):
-                        status += " [LATE]"
-                    if sub.get("workflow_state") == "graded":
-                        status += f" [already graded: {sub.get('score')}]"
-                    print(f"  [OK] {user_name} -> {local_path.name}{status}")
+                downloaded_files: list[str] = []
+                failed_count = 0
+                for attachment_index, attachment in enumerate(pdf_attachments, start=1):
+                    attachment_count = len(pdf_attachments)
+                    if attachment_count > 1:
+                        attachment_stem = Path(attachment.get("display_name") or attachment.get("filename") or "").stem
+                        attachment_stem = re.sub(r"[^\w一-鿿\-]", "_", attachment_stem)[:30]
+                        part_suffix = f"_part{attachment_index:02d}"
+                        if attachment_stem:
+                            preferred_name = f"{preferred}{part_suffix}_{attachment_stem}"
+                        else:
+                            preferred_name = f"{preferred}{part_suffix}"
+                    else:
+                        preferred_name = preferred
+
+                    local_path = canvas.download_attachment(attachment, pdf_dir, preferred_name)
+                    if local_path and local_path.stat().st_size > 0:
+                        student_pdfs.append(local_path)
+                        submission_map[local_path.name] = sub
+                        downloaded_files.append(local_path.name)
+                    else:
+                        failed_count += 1
+
+                status = ""
+                if sub.get("late"):
+                    status += " [LATE]"
+                if sub.get("workflow_state") == "graded":
+                    status += f" [already graded: {sub.get('score')}]"
+                if downloaded_files:
+                    file_list = "; ".join(downloaded_files[:3])
+                    if len(downloaded_files) > 3:
+                        file_list += f"; +{len(downloaded_files) - 3} more"
+                    extra = f", {failed_count} failed" if failed_count else ""
+                    print(f"  [OK] {user_name}: downloaded {len(downloaded_files)}/{len(pdf_attachments)} file(s){extra} -> {file_list}{status}")
                 else:
-                    print(f"  [FAIL] {sub['user_name']} (user {user_id}): download failed or empty file")
+                    print(f"  [FAIL] {sub['user_name']} (user {user_id}): all {len(pdf_attachments)} attachment(s) failed or empty")
 
         if args.canvas_fetch_only:
             print(f"\nFetched {len(student_pdfs)} PDFs to {pdf_dir}")
@@ -1137,6 +1257,8 @@ def integrated_main(args: argparse.Namespace) -> int:
             print(f"Loaded {len(results)} existing results from {results_path}")
             if results and "_score_decimals" not in results[0]:
                 results[0]["_score_decimals"] = args.score_decimals
+            if not args.generate_feedback:
+                suppress_feedback_texts(results)
         else:
             # --- AI grading setup ---
             ai_args = argparse.Namespace(
@@ -1190,7 +1312,7 @@ def integrated_main(args: argparse.Namespace) -> int:
             existing_results = load_existing_results(output_dir) if args.resume else {}
             if existing_results and args.resume:
                 print(f"Found {len(existing_results)} reusable existing result(s).")
-            results = run_grading_pipeline(
+            file_results = run_grading_pipeline(
                 ai=ai,
                 student_pdfs=student_pdfs,
                 answer_key=answer_key,
@@ -1207,19 +1329,32 @@ def integrated_main(args: argparse.Namespace) -> int:
                 rate_limiter=rate_limiter,
                 existing_results=existing_results,
                 max_new_pdfs=args.max_pdfs,
+                generate_feedback=args.generate_feedback,
             )
 
             # --- Second-pass AI review for flagged questions ---
             if not args.no_review_pass:
                 print("=" * 60)
                 print("Second-pass review for flagged questions...")
-                review_flagged_questions(ai, results, answer_key, extra_rules, rate_limiter=rate_limiter)
+                review_flagged_questions(
+                    ai,
+                    file_results,
+                    answer_key,
+                    extra_rules,
+                    rate_limiter=rate_limiter,
+                    max_workers=args.max_workers,
+                )
 
             # --- Attach canvas_user_id to each result ---
-            for result in results:
+            for result in file_results:
                 canvas_uid = resolve_canvas_user_id(result, grading_roster)
                 if canvas_uid is not None:
                     result["canvas_user_id"] = canvas_uid
+
+            results = merge_results_by_student(file_results, answer_key, grading_roster, args.score_decimals)
+            if not args.generate_feedback:
+                suppress_feedback_texts(file_results)
+                suppress_feedback_texts(results)
 
             # --- Statistical outlier check ---
             if len(results) >= 3:
@@ -1230,7 +1365,11 @@ def integrated_main(args: argparse.Namespace) -> int:
             # --- Write output files ---
             if results:
                 results[0]["_score_decimals"] = args.score_decimals
+            file_results = sanitize_for_output(file_results)
             results = sanitize_for_output(results)
+            (output_dir / "file_results.json").write_text(
+                json.dumps(file_results, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             (output_dir / "results.json").write_text(
                 json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -1258,7 +1397,7 @@ def integrated_main(args: argparse.Namespace) -> int:
                 run_started_at,
                 write_json=args.output_profile == "full",
             )
-            write_submission_diagnostics(output_dir, results, write_json=args.output_profile == "full")
+            write_submission_diagnostics(output_dir, file_results, write_json=args.output_profile == "full")
 
         # --- Upload grades to Canvas ---
         if args.canvas_skip_upload:
@@ -1269,6 +1408,8 @@ def integrated_main(args: argparse.Namespace) -> int:
         print("=" * 60)
         if args.canvas_dry_run_upload:
             print("DRY RUN: previewing grades that would be uploaded...\n")
+        if not args.canvas_upload_comments or not args.generate_feedback:
+            print("Canvas comments disabled; uploading grades only.")
 
         upload_count = 0
         skip_count = 0
@@ -1292,11 +1433,12 @@ def integrated_main(args: argparse.Namespace) -> int:
                 skip_count += 1
                 continue
 
-            comment = format_feedback_comment(result, answer_key)
+            comment = format_feedback_comment(result, answer_key) if args.canvas_upload_comments and args.generate_feedback else ""
 
             if args.canvas_dry_run_upload:
                 print(f"  [DRY RUN] user={canvas_uid} | {result.get('name', '')} "
-                      f"({result.get('student_id', '')}) | score={score}")
+                      f"({result.get('student_id', '')}) | score={score} | "
+                      f"comment={'yes' if comment else 'no'}")
                 upload_count += 1
                 continue
 
@@ -1401,6 +1543,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                             help="Grade and generate reports, but skip Canvas upload.")
     flow_group.add_argument("--canvas-overwrite-grades", action="store_true",
                             help="Overwrite grades for students who were already graded in Canvas.")
+    flow_group.add_argument("--canvas-upload-comments", action="store_true", dest="canvas_upload_comments",
+                            default=None, help="Upload Canvas text comments with grades. Enabled by default.")
+    flow_group.add_argument("--no-canvas-upload-comments", action="store_false", dest="canvas_upload_comments",
+                            default=None, help="Upload grades only, without Canvas text comments.")
     flow_group.add_argument("--canvas-ungraded-only", action="store_true",
                             help="Only process submissions that have not been graded yet. "
                                  "Skips already-graded students before downloading and grading.")
@@ -1470,6 +1616,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     out_group.add_argument("--output-profile", choices=["compact", "full"],
                            default=os.getenv("AI_GRADER_OUTPUT_PROFILE", "compact"),
                            help="compact writes essential outputs; full writes all debug/report files.")
+    out_group.add_argument("--generate-feedback", action="store_true", dest="generate_feedback",
+                           default=None, help="Generate per-question and overall feedback text. Enabled by default.")
+    out_group.add_argument("--no-generate-feedback", action="store_false", dest="generate_feedback",
+                           default=None, help="Do not generate or write student-facing feedback text.")
     out_group.add_argument("--resume", action="store_true", dest="resume", default=True,
                            help="Reuse existing successful results from results.json/partial_results.json. Enabled by default.")
     out_group.add_argument("--no-resume", action="store_false", dest="resume",
@@ -1514,6 +1664,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise SystemExit("Missing --canvas-course-id or CANVAS_COURSE_ID env var.")
     if not args.canvas_assignment_id:
         raise SystemExit("Missing --canvas-assignment-id or CANVAS_ASSIGNMENT_ID env var.")
+    if args.canvas_upload_comments is None:
+        args.canvas_upload_comments = True
+    if args.generate_feedback is None:
+        args.generate_feedback = True
     if not args.canvas_upload_only and not args.canvas_export_grades and not args.answer and not args.answer_key_json:
         raise SystemExit("Provide --answer or --answer-key-json for the reference answer PDF.")
     if args.max_workers < 1:

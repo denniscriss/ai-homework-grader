@@ -1,0 +1,61 @@
+{
+  "_template_note": [
+    "Canvas mode reference config. Copy this file to setting/canvas_config.json before use.",
+    "Do not put API keys or Canvas tokens here. Put private values in setting/api_env.sh.",
+    "Review-first workflow: ./run_canvas.sh grade, inspect/edit output results, ./run_canvas.sh preview, then ./run_canvas.sh upload.",
+    "Fully automatic publishing is still available as ./run_canvas.sh auto-upload."
+  ],
+  "_required_fields": {
+    "answer": "Reference-answer PDF path.",
+    "roster": "Optional local roster path. Recommended when Canvas lacks student IDs.",
+    "canvas_course_id": "Canvas course id.",
+    "canvas_assignment_id": "Canvas assignment id.",
+    "output_dir": "Where generated outputs and caches go."
+  },
+  "_lenient_canvas_policy": {
+    "summary": "Canvas mode uses grading_mode=lenient plus TA extra scoring rules.",
+    "regular_questions": "Wrong answers within 3 questions: no deduction; within 6: about -1 total; more than 6: about -1.5 total; very unreasonable work: about -2 total; try not to go below 80% unless very poor.",
+    "bonus_questions": "Bonus questions remain moderately strict."
+  },
+
+  "mode": "canvas",
+
+  "answer": "answers/作业X答案.pdf",
+  "roster": "homework/名单.xlsx",
+  "output_dir": "output/canvas_homework_X",
+
+  "canvas_url": "https://oc.sjtu.edu.cn/api/v1",
+  "canvas_course_id": "填写课程ID",
+  "canvas_assignment_id": "填写作业ID",
+  "canvas_ungraded_only": false,
+  "canvas_student_slice": null,
+  "canvas_overwrite_grades": false,
+  "canvas_upload_comments": true,
+
+  "backend": "chat-vision",
+  "grading_mode": "lenient",
+  "no_ta_scoring": false,
+  "regular_points": 10,
+  "bonus_points": 0,
+  "point_mode": "total",
+  "review_threshold": 0.75,
+  "score_decimals": 2,
+  "blank_review_scores": false,
+  "generate_feedback": true,
+
+  "max_workers": 4,
+  "requests_per_minute": 10,
+  "max_pdfs": null,
+  "api_timeout": 120,
+  "api_max_retries": 0,
+  "render_timeout": 120,
+  "render_dpi": 160,
+  "max_render_pages": 12,
+
+  "output_profile": "compact",
+  "resume": true,
+  "refresh_answer_key": false,
+  "no_ai_analysis": false,
+  "analysis_max_students": 120,
+  "verbose": false
+}
