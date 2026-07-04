@@ -198,13 +198,63 @@ cp setting/run_config.template.json setting/run_config.json
 
 ### Canvas 常用分步命令
 
-`setting/run_config.json` 中设置 `"mode": "canvas"` 后，可以这样分步跑：
+Canvas 模式可以使用独立模板和脚本：
 
 ```bash
-./run.sh --canvas-fetch-only
-./run.sh --canvas-skip-upload
-./run.sh --canvas-dry-run-upload
-./run.sh
+cp setting/canvas_config.template.json setting/canvas_config.json
+```
+
+编辑 `setting/canvas_config.json`，填写：
+
+- `answer`
+- `roster`
+- `output_dir`
+- `canvas_course_id`
+- `canvas_assignment_id`
+- 并发和限速参数，例如 `max_workers`、`requests_per_minute`
+
+然后按步骤运行：
+
+```bash
+./run_canvas.sh fetch      # 只从 Canvas 下载提交
+./run_canvas.sh grade      # 批改并生成输出，但不上传
+./run_canvas.sh excel      # 用已有 results.json 重新生成 Excel/Markdown，不重新批改
+./run_canvas.sh preview    # 只预览已有 results.json 将上传什么，不重新批改
+./run_canvas.sh upload     # 只上传已有 results.json，不重新批改
+```
+
+如果你确定不需要本地复核，也可以一条命令完成抓取、批改、复核和上传：
+
+```bash
+./run_canvas.sh auto-upload
+```
+
+推荐真实发布成绩时使用 `grade -> preview -> upload`：先检查 `output_dir` 里的 Excel、`人工复核.xlsx` 和 `results.json`，必要时本地修改后再上传。手动修改 `results.json` 后，可以运行 `./run_canvas.sh excel` 刷新 Excel 高亮和汇总表。这样不会因为重新运行批改覆盖你已经人工确认过的结果。
+
+Excel 高亮规则：低于 7 分的行会标红，`needs_review=true` 的行会标黄，同时低分且需复核会标橙。高分也可能被标黄，因为它只表示需要人工确认，不代表扣分。
+
+如果只想上传成绩、不想给 Canvas 留评语，把配置里的 `canvas_upload_comments` 设为 `false`：
+
+```json
+"canvas_upload_comments": false
+```
+
+如果连本地结果里的总体反馈/题目反馈也不想生成，把配置里的 `generate_feedback` 设为 `false`：
+
+```json
+"generate_feedback": false
+```
+
+`generate_feedback=false` 会让 AI 尽量不生成 `overall_feedback` 和每题 `feedback`，并在写入 `results.json`、Excel 和 Canvas 上传前再次清空这些学生评语字段。`review_reason` 和 `review_reasons` 会保留，因为它们用于助教人工复核。
+
+Canvas 模式默认使用 `grading_mode=lenient`，并叠加 TA 宽松规则：答案错 3 题以内不扣分，6 题以内总扣约 1 分，更多错误总扣约 1.5 分，步骤非常离谱时约扣 2 分，除非做得非常差，否则常规题总分尽量不低于 80%。
+
+Canvas 二次复核只处理首次批改中 `needs_review=true` 的题目；现在按“每份提交一次请求”批量复核该提交内所有待复核题，并复用 `max_workers` 并行和 `requests_per_minute` 限速。
+
+也可以指定另一个 Canvas 配置：
+
+```bash
+./run_canvas.sh setting/my_canvas_config.json grade
 ```
 
 ### 导出 Canvas 成绩表
@@ -428,9 +478,12 @@ Canvas 采用漏桶算法限流。脚本内置了：
 | `answer_key_meta.json` | 参考答案 PDF 指纹和配分参数，用于判断缓存是否可复用 |
 | `AI请求速率分析.md` | AI 请求次数、平均速率和限流等待统计 |
 | `作业耗时诊断.md` | 每份作业的总耗时、渲染耗时、AI 请求耗时和异常原因 |
-| `results.json` | 完整的结构化批改结果 |
+| `results.json` | 按学生合并后的最终结构化结果；同一学生多文件会按题号合并 |
+| `file_results.json` | 按单个文件保存的批改结果，用于续跑缓存和追溯 |
 
-运行中会实时写入 `partial_results.json` 作为中断备份；`compact` 模式正常完成后会删除它，下一次续跑使用 `results.json`。
+运行中会实时写入 `partial_results.json` 作为中断备份；`compact` 模式正常完成后会删除它，下一次续跑优先使用 `file_results.json`。
+
+如果同一学生提交多个文件，程序默认按学生合并最终成绩：同一题号在多个文件中取最高分，不同题号重新汇总为该学生总分。`批改明细.xlsx` 会保留题目来源文件，方便追溯。
 
 加 `--output-profile full` 时额外生成：
 

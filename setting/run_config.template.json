@@ -55,6 +55,7 @@
     },
     "06_output_and_debug": {
       "output_profile": "compact keeps essential files; full keeps extra markdown/json diagnostics.",
+      "multi_file_merge": "Always enabled. Final results are merged by student; duplicate question ids use the highest score.",
       "no_ai_analysis": "true skips AI class analysis.",
       "analysis_max_students": "Maximum students used in AI class analysis.",
       "dry_run_discover": "true only checks input discovery and does not call AI.",
@@ -85,7 +86,7 @@
   "answer": "answers/example_answer.pdf",
   "submissions": "homework/example_submissions.zip",
   "roster": "homework/roster.xlsx",
-  "output_dir": "output",
+  "output_dir": "output/example_results",
   "answer_key_json": null,
   "refresh_answer_key": false,
 

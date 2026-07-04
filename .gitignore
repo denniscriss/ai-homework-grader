@@ -22,6 +22,7 @@ answers/
 job/
 setting/run_config.json
 setting/grading_config.json
+setting/canvas_config.json
 
 # OS files
 .DS_Store
