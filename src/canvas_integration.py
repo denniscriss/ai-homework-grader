@@ -50,6 +50,7 @@ from grade_homework_skill_patch import (
     grading_schema,
     load_or_extract_answer_key,
     load_existing_results,
+    LOW_SCORE_HIGHLIGHT_THRESHOLD,
     make_ai_backend,
     merge_results_by_student,
     norm_id,
@@ -900,6 +901,93 @@ def detect_score_outliers(results: list[dict[str, Any]], std_threshold: float = 
 # Main workflow
 # ---------------------------------------------------------------------------
 
+def _safe_score(value: Any) -> float | None:
+    try:
+        if value in ("", None):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _result_source_names(result: dict[str, Any]) -> list[str]:
+    raw_sources = result.get("source_files")
+    if isinstance(raw_sources, list):
+        names = [str(item).strip() for item in raw_sources if str(item).strip()]
+    else:
+        names = []
+    if not names:
+        names = [part.strip() for part in str(result.get("filename", "")).split(";") if part.strip()]
+    return list(dict.fromkeys(names))
+
+
+def save_low_score_submission_files(
+    results: list[dict[str, Any]],
+    downloaded_pdfs: list[Path],
+    output_dir: Path,
+    enabled: bool,
+    threshold: float,
+    folder_name: str,
+) -> None:
+    """Copy low-score source PDFs out of the temporary Canvas work directory."""
+    if not enabled or not downloaded_pdfs:
+        return
+
+    pdf_by_name = {pdf.name: pdf for pdf in downloaded_pdfs}
+    low_score_results = [
+        result for result in results
+        if (score := _safe_score(result.get("total_score"))) is not None and score < threshold
+    ]
+    if not low_score_results:
+        return
+
+    target_dir = output_dir / folder_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    copied: list[tuple[dict[str, Any], Path, Path]] = []
+    missing: list[tuple[dict[str, Any], str]] = []
+    for result in low_score_results:
+        for source_name in _result_source_names(result):
+            source = pdf_by_name.get(source_name)
+            if not source or not source.exists():
+                missing.append((result, source_name))
+                continue
+            destination = target_dir / source.name
+            shutil.copy2(source, destination)
+            copied.append((result, source, destination))
+
+    manifest_lines = [
+        "# 低分作业文件清单",
+        "",
+        f"- 阈值：总分 < {threshold:g}",
+        f"- 保存目录：{target_dir}",
+        f"- 本次低分学生：{len(low_score_results)}",
+        f"- 已复制文件：{len(copied)}",
+        "",
+    ]
+    if copied:
+        manifest_lines.append("## 已复制")
+        manifest_lines.append("")
+        for result, _source, destination in copied:
+            manifest_lines.append(
+                f"- {result.get('student_id', '')} {result.get('name', '')} "
+                f"score={result.get('total_score', '')}: {destination.name}"
+            )
+        manifest_lines.append("")
+    if missing:
+        manifest_lines.append("## 未找到源文件")
+        manifest_lines.append("")
+        for result, source_name in missing:
+            manifest_lines.append(
+                f"- {result.get('student_id', '')} {result.get('name', '')} "
+                f"score={result.get('total_score', '')}: {source_name}"
+            )
+        manifest_lines.append("")
+
+    (output_dir / "低分作业文件清单.md").write_text("\n".join(manifest_lines), encoding="utf-8")
+    print(f"Saved {len(copied)} low-score submission file(s) to {target_dir}")
+
+
 def _regenerate_output_files(output_dir: Path, args: argparse.Namespace) -> int:
     """Regenerate all Excel/MD output files from existing results.json and answer_key.json."""
     results_path = output_dir / "results.json"
@@ -1356,6 +1444,15 @@ def integrated_main(args: argparse.Namespace) -> int:
                 suppress_feedback_texts(file_results)
                 suppress_feedback_texts(results)
 
+            save_low_score_submission_files(
+                results=results,
+                downloaded_pdfs=student_pdfs,
+                output_dir=output_dir,
+                enabled=args.save_low_score_files,
+                threshold=args.low_score_file_threshold,
+                folder_name=args.low_score_files_dir,
+            )
+
             # --- Statistical outlier check ---
             if len(results) >= 3:
                 print("=" * 60)
@@ -1620,6 +1717,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                            default=None, help="Generate per-question and overall feedback text. Enabled by default.")
     out_group.add_argument("--no-generate-feedback", action="store_false", dest="generate_feedback",
                            default=None, help="Do not generate or write student-facing feedback text.")
+    out_group.add_argument("--save-low-score-files", action="store_true", dest="save_low_score_files",
+                           default=None, help="Copy low-score submission PDFs from the temporary Canvas workdir into output_dir. Enabled by default.")
+    out_group.add_argument("--no-save-low-score-files", action="store_false", dest="save_low_score_files",
+                           default=None, help="Do not copy low-score submission PDFs into output_dir.")
+    out_group.add_argument("--low-score-file-threshold", type=float, default=LOW_SCORE_HIGHLIGHT_THRESHOLD,
+                           help="Save source files for submissions with total_score below this threshold.")
+    out_group.add_argument("--low-score-files-dir", default="low_score_submissions",
+                           help="Directory name under output_dir for copied low-score submission files.")
     out_group.add_argument("--resume", action="store_true", dest="resume", default=True,
                            help="Reuse existing successful results from results.json/partial_results.json. Enabled by default.")
     out_group.add_argument("--no-resume", action="store_false", dest="resume",
@@ -1668,6 +1773,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.canvas_upload_comments = True
     if args.generate_feedback is None:
         args.generate_feedback = True
+    if args.save_low_score_files is None:
+        args.save_low_score_files = True
+    if args.low_score_file_threshold < 0:
+        raise SystemExit("--low-score-file-threshold must be >= 0.")
+    if not str(args.low_score_files_dir).strip():
+        raise SystemExit("--low-score-files-dir must not be empty.")
     if not args.canvas_upload_only and not args.canvas_export_grades and not args.answer and not args.answer_key_json:
         raise SystemExit("Provide --answer or --answer-key-json for the reference answer PDF.")
     if args.max_workers < 1:

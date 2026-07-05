@@ -233,6 +233,14 @@ cp setting/canvas_config.template.json setting/canvas_config.json
 
 Excel 高亮规则：低于 7 分的行会标红，`needs_review=true` 的行会标黄，同时低分且需复核会标橙。高分也可能被标黄，因为它只表示需要人工确认，不代表扣分。
 
+Canvas 批改时会默认把低于 7 分的学生源文件复制到 `output_dir/low_score_submissions/`，并生成 `低分作业文件清单.md`，方便核对标红学生。可以在配置中调整或关闭：
+
+```json
+"save_low_score_files": true,
+"low_score_file_threshold": 7,
+"low_score_files_dir": "low_score_submissions"
+```
+
 如果只想上传成绩、不想给 Canvas 留评语，把配置里的 `canvas_upload_comments` 设为 `false`：
 
 ```json
@@ -480,6 +488,8 @@ Canvas 采用漏桶算法限流。脚本内置了：
 | `作业耗时诊断.md` | 每份作业的总耗时、渲染耗时、AI 请求耗时和异常原因 |
 | `results.json` | 按学生合并后的最终结构化结果；同一学生多文件会按题号合并 |
 | `file_results.json` | 按单个文件保存的批改结果，用于续跑缓存和追溯 |
+| `low_score_submissions/` | Canvas 模式下自动保存的低分学生源文件 |
+| `低分作业文件清单.md` | 本次保存的低分源文件清单 |
 
 运行中会实时写入 `partial_results.json` 作为中断备份；`compact` 模式正常完成后会删除它，下一次续跑优先使用 `file_results.json`。
 

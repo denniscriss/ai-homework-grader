@@ -42,6 +42,9 @@
   "score_decimals": 2,
   "blank_review_scores": false,
   "generate_feedback": true,
+  "save_low_score_files": true,
+  "low_score_file_threshold": 7,
+  "low_score_files_dir": "low_score_submissions",
 
   "max_workers": 4,
   "requests_per_minute": 10,
